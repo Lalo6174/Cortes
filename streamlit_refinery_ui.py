@@ -315,14 +315,18 @@ with tabs[0]: # Alimentación y Escenarios
 
             if uploaded_file is not None:
                 df_uploaded = None
-                # Intentar leer con diferentes codificaciones comunes
-                encodings_to_try = ['utf-8', 'latin1', 'iso-8859-1', 'windows-1252']
+                # Lista de encodings a probar, incluyendo utf-8-sig para el BOM
+                encodings_to_try = ['utf-8-sig', 'utf-8', 'latin1', 'iso-8859-1', 'windows-1252']
+                success_reading = False
                 for encoding in encodings_to_try:
                     try:
                         uploaded_file.seek(0) 
                         # Intentar detectar separador automáticamente y manejar espacios
-                        df_uploaded = pd.read_csv(uploaded_file, encoding=encoding, sep=None, engine='python', skipinitialspace=True)
-                        logging.info(f"CSV '{uploaded_file.name}' leído con encoding '{encoding}' y detector de sep.")
+                        # También se puede especificar el separador si se sabe que es, por ejemplo, ';'
+                        # df_uploaded = pd.read_csv(uploaded_file, encoding=encoding, sep=None, engine='python', skipinitialspace=True)
+                        df_uploaded = pd.read_csv(uploaded_file, encoding=encoding, skipinitialspace=True) # Dejar que pandas infiera el separador
+                        logging.info(f"CSV '{uploaded_file.name}' leído con encoding '{encoding}'. Columnas: {df_uploaded.columns.tolist()}")
+                        success_reading = True
                         break 
                     except UnicodeDecodeError:
                         logging.warning(f"Fallo al decodificar CSV '{uploaded_file.name}' con encoding '{encoding}'.")
@@ -330,11 +334,11 @@ with tabs[0]: # Alimentación y Escenarios
                     except Exception as e_read: 
                         logging.error(f"Error leyendo CSV '{uploaded_file.name}' con encoding '{encoding}': {e_read}")
                         df_uploaded = None
-                        break 
-
-                if df_uploaded is not None:
-                    # Limpiar nombres de columnas (quitar espacios extra)
-                    df_uploaded.columns = df_uploaded.columns.str.strip()
+                        # No romper el bucle aquí, podría ser un problema de separador que otro encoding no solucione
+                
+                if success_reading and df_uploaded is not None:
+                    # Limpiar nombres de columnas (quitar espacios extra y caracteres invisibles como el BOM si no lo hizo utf-8-sig)
+                    df_uploaded.columns = df_uploaded.columns.str.strip().str.replace('\ufeff', '', regex=False)
 
                     # Mapeo de posibles nombres de columnas (inglés/español) a los nombres estándar en español
                     column_name_map = {
@@ -348,6 +352,8 @@ with tabs[0]: # Alimentación y Escenarios
                         "Temperatura (°C)": "Temperatura (°C)"
                     }
                     df_uploaded.rename(columns=column_name_map, inplace=True)
+                    logging.info(f"Columnas después del mapeo: {df_uploaded.columns.tolist()}")
+
 
                     if "Volumen (%)" in df_uploaded.columns and "Temperatura (°C)" in df_uploaded.columns:
                         df_uploaded["Volumen (%)"] = pd.to_numeric(df_uploaded["Volumen (%)"], errors='coerce')
@@ -362,8 +368,8 @@ with tabs[0]: # Alimentación y Escenarios
                         else:
                             st.warning(f"CSV '{uploaded_file.name}' sin datos válidos (>= 2 puntos después de procesar).")
                     else:
-                        st.error(f"CSV '{uploaded_file.name}' no contiene las columnas esperadas (Volumen y Temperatura) incluso después de intentar mapear nombres comunes. Columnas encontradas: {list(df_uploaded.columns)}")
-                else:
+                        st.error(f"CSV '{uploaded_file.name}' no contiene las columnas esperadas ('Volumen (%)' y 'Temperatura (°C)') incluso después de intentar mapear nombres comunes. Columnas encontradas: {list(df_uploaded.columns)}")
+                elif not success_reading: # Si df_uploaded es None después de probar todos los encodings
                     st.error(f"No se pudo leer o decodificar el archivo CSV '{uploaded_file.name}' con las codificaciones y separadores probados. Verifique el formato y la codificación del archivo.")
 
 
