@@ -1,0 +1,901 @@
+import streamlit as st
+import pandas as
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+from streamlit_agraph import agraph, Node, Edge, Config
+from datetime import datetime
+from empirical_data import EmpiricalDistributionManager
+
+try:
+    from refinery_calculations import (
+        CrudeOil, DistillationCut, calculate_distillation_cuts, create_blend_from_crudes,
+        api_to_sg
+    )
+    from ui_logic import initialize_session_state, validate_crude_proportions, validate_cut_definitions, export_results_to_csv
+    from process_blocks import initialize_process_blocks, add_process_block, remove_process_block
+except ImportError:
+    st.error("Error: No se pudo encontrar el archivo 'refinery_calculations.py', 'ui_logic.py' o 'process_blocks.py'. Asegúrate de que estén en el mismo directorio.")    
+    st.stop()
+
+st.set_page_config(layout="wide", page_title="Simulador de Cortes de Crudo")
+
+st.title("🛢️ Estimador de Cortes de Crudo y Distribución de Azufre")
+st.markdown("""
+Esta aplicación estima los rendimientos y propiedades de los cortes de destilación
+a partir de las características de uno o varios crudos (mezcla) y sus curvas de destilación.
+Permite ajustar algunos parámetros de simulación.
+""")
+
+initialize_session_state()
+initialize_process_blocks()
+
+# Crear pestañas para segmentar la información
+tabs = st.tabs(["Crudos y Mezcla", "Cortes Esperados", "Parámetros de Cálculo", "Resultados"])
+
+# --- Pestaña: Crudos y Mezcla ---
+with tabs[0]:
+    st.header("🛢️ Crudos y Mezcla")
+    st.subheader("Componentes de la Mezcla de Crudo")
+
+    num_crudes = len(st.session_state.crude_components)
+    col1_btn, col2_btn = st.columns(2)
+    with col1_btn:
+        if st.button("➕ Añadir Crudo a la Mezcla", use_container_width=True):
+            new_crude_data = {
+                "id": st.session_state.next_crude_id,
+                "name": f"Crudo Componente {st.session_state.next_crude_id}",
+                "api": 30.0, "sulfur": 0.5, "proportion_vol": 0.0,
+                "dist_curve": pd.DataFrame([{"Volumen (%)": 0, "Temperatura (°C)": 50}])
+            }
+            st.session_state.crude_components.append(new_crude_data)
+            st.session_state.next_crude_id += 1
+            st.rerun()
+    with col2_btn:
+        if num_crudes > 1:
+            if st.button("➖ Quitar Último Crudo", type="secondary", use_container_width=True):
+                st.session_state.crude_components.pop()
+                st.rerun()
+
+    st.markdown("---")
+
+    total_proportion_entered = 0
+    for i, crude_comp_data in enumerate(st.session_state.crude_components):
+        with st.expander(f"Datos del Crudo Componente #{i+1}: {crude_comp_data.get('name', '')}", expanded=True):
+            comp_id = crude_comp_data["id"]
+            st.session_state.crude_components[i]['name'] = st.text_input(f"Nombre Crudo #{i+1}", value=crude_comp_data['name'], key=f"name_{comp_id}")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.session_state.crude_components[i]['api'] = st.number_input(f"API Crudo #{i+1}", value=crude_comp_data['api'], min_value=0.0, max_value=100.0, step=0.1, format="%.1f", key=f"api_{comp_id}")
+            with c2:
+                st.session_state.crude_components[i]['sulfur'] = st.number_input(f"Azufre Crudo #{i+1} (%peso)", value=crude_comp_data['sulfur'], min_value=0.0, max_value=10.0, step=0.01, format="%.4f", key=f"sulfur_{comp_id}")
+            with c3:
+                st.session_state.crude_components[i]['proportion_vol'] = st.number_input(f"Proporción Crudo #{i+1} (%vol)", value=crude_comp_data['proportion_vol'], min_value=0.0, max_value=100.0, step=0.1, format="%.1f", key=f"prop_{comp_id}")
+            total_proportion_entered += st.session_state.crude_components[i]['proportion_vol']
+            st.markdown(f"**Curva de Destilación Crudo #{i+1}**")
+            st.session_state.crude_components[i]['dist_curve'] = st.data_editor(
+                crude_comp_data['dist_curve'], num_rows="dynamic", key=f"dist_curve_{comp_id}",
+                column_config={
+                    "Volumen (%)": st.column_config.NumberColumn(format="%d%%", min_value=0, max_value=100),
+                    "Temperatura (°C)": st.column_config.NumberColumn(format="%d°C", min_value=0)
+                }
+            )
+        st.markdown("---")
+
+    if num_crudes > 1:
+        if not np.isclose(total_proportion_entered, 100.0):
+            st.warning(f"La suma de las proporciones de los crudos es {total_proportion_entered:.1f}%. Debe ser 100%.")
+        else:
+            st.success(f"Suma de proporciones: {total_proportion_entered:.1f}%. Correcto.")
+
+    st.markdown("---")
+    calculate_button = st.button("Calcular Cortes y Propiedades", type="primary", use_container_width=True)
+
+# --- Pestaña: Cortes Esperados ---
+with tabs[1]:
+    st.header("📋 Definición de Cortes Esperados")
+    st.markdown("Defina los cortes esperados para las unidades de proceso.")
+    st.session_state.edited_cuts_df = st.data_editor(
+        st.session_state.edited_cuts_df, num_rows="dynamic", key="cuts_editor",
+        column_config={
+            "Nombre del Corte": st.column_config.TextColumn(),
+            "Temperatura Final (°C)": st.column_config.NumberColumn(format="%d°C", min_value=0)
+        }
+    )
+
+# --- Pestaña: Parámetros de Cálculo ---
+with tabs[2]:
+    st.header("⚙️ Parámetros y Ecuaciones de Cálculo")
+    
+    # Sección de Factor API
+    st.subheader("Factor de Sensibilidad API")
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        st.markdown("""
+        El factor de sensibilidad API controla cómo varía la gravedad API de cada corte en función de su temperatura media de ebullición (VABP)
+        relativa al punto medio de la curva de destilación del crudo (T50).
+        
+        **Ecuación Base:**
+        ```
+        API_corte = API_crudo + Factor_API * (T50_crudo - VABP_corte) / 100
+        ```
+        """)
+    with col2:
+        current_api_factor = st.number_input(
+            "Factor API",
+            value=float(st.session_state.get('api_sensitivity_factor', 5.0)),
+            min_value=0.0,
+            max_value=20.0,
+            step=0.1,
+            help="Factor que controla la variación de API entre cortes"
+        )
+        st.session_state.api_sensitivity_factor = current_api_factor
+
+    # Sección de Balance Volumétrico
+    st.subheader("Balance Volumétrico")
+    st.markdown("""
+    El balance volumétrico se basa en la curva de destilación TBP (True Boiling Point) del crudo
+    o mezcla de crudos. Los rendimientos se calculan como:
+    
+    **Ecuación de Rendimiento Volumétrico:**
+    ```
+    Rend_Vol(%) = Vol%(T_final) - Vol%(T_inicial)
+    ```
+    donde:
+    - T_final: Temperatura final del corte
+    - T_inicial: Temperatura inicial del corte (final del corte anterior)
+    - Vol%: Porcentaje volumétrico recuperado a cada temperatura según la curva TBP
+    """)
+
+    # Sección de Balance de Peso
+    st.subheader("Balance de Peso")
+    st.markdown("""
+    El rendimiento en peso se calcula a partir del rendimiento volumétrico y las gravedades específicas:
+    
+    **Ecuación de Rendimiento en Peso:**
+    ```
+    Rend_Peso(%) = Rend_Vol(%) * (SG_corte / SG_crudo)
+    ```
+    donde:
+    - SG_corte: Gravedad específica del corte (calculada desde su API)
+    - SG_crudo: Gravedad específica del crudo de alimentación
+    """)
+
+    # Sección de Distribución de Azufre
+    st.subheader("Distribución de Azufre")
+    st.markdown("""
+    La distribución de azufre entre los cortes sigue un modelo empírico basado en el punto de ebullición:
+    
+    **Ecuación de Contenido de Azufre:**
+    ```
+    S_corte = S_crudo * Factor_Distribucion_S * (VABP_corte / T50_crudo)^0.5
+    ```
+    donde:
+    - S_corte: Contenido de azufre en el corte (%peso)
+    - S_crudo: Contenido de azufre en el crudo (%peso)
+    - Factor_Distribucion_S: Factor empírico que ajusta la distribución
+    - VABP_corte: Temperatura media de ebullición del corte
+    - T50_crudo: Temperatura al 50% de destilación del crudo
+    """)
+
+    # Sección de Notas y Observaciones
+    st.markdown("---")
+    st.subheader("📝 Notas y Limitaciones")
+    st.markdown("""
+    - Las ecuaciones son aproximaciones empíricas basadas en correlaciones generales.
+    - La precisión depende de la calidad de los datos de entrada y la naturaleza del crudo.
+    - Los ajustes manuales permiten calibrar el modelo con datos reales.
+    - No se consideran efectos de mezclas no ideales entre componentes.
+    """)
+
+# --- Pestaña: Resultados ---
+with tabs[3]:
+    st.header("📊 Resultados de la Simulación")
+    st.markdown("Aquí se mostrarán los resultados de los cálculos y gráficos interactivos.")
+
+    # Inicializar variables de estado de sesión para esta pestaña si no existen
+    if 'calculated_cuts_objects' not in st.session_state:
+        st.session_state.calculated_cuts_objects = None
+    if 'crude_to_process' not in st.session_state:
+        st.session_state.crude_to_process = None
+    if 'api_sensitivity_factor_display' not in st.session_state:
+        st.session_state.api_sensitivity_factor_display = None
+    if 'manual_edits_valid' not in st.session_state: # Para rastrear el estado de validación de los ajustes manuales
+        st.session_state.manual_edits_valid = True
+
+
+    if calculate_button: # Este botón es de la primera pestaña
+        if len(st.session_state.crude_components) > 1:
+            validate_crude_proportions()
+        validate_cut_definitions()
+        try:
+            crude_components_for_logic = []
+            for comp_data_ui in st.session_state.crude_components:
+                dist_curve_list = []
+                if "Volumen (%)" not in comp_data_ui['dist_curve'].columns or \
+                   "Temperatura (°C)" not in comp_data_ui['dist_curve'].columns:
+                    st.error(f"Las columnas de la curva de destilación para '{comp_data_ui['name']}' no son correctas. Se esperan 'Volumen (%)' y 'Temperatura (°C)'.")
+                    st.stop()
+                for _, row in comp_data_ui['dist_curve'].iterrows():
+                    if pd.notna(row["Volumen (%)"]) and pd.notna(row["Temperatura (°C)"]):
+                         dist_curve_list.append((float(row["Volumen (%)"]), float(row["Temperatura (°C)"])))
+                if not dist_curve_list:
+                    st.error(f"La curva de destilación para el crudo '{comp_data_ui['name']}' está vacía o no contiene puntos válidos.")
+                    st.stop()
+                crude_components_for_logic.append({
+                    'name': comp_data_ui['name'], 'api': comp_data_ui['api'], 'sulfur': comp_data_ui['sulfur'],
+                    'distillation_data': dist_curve_list, 'proportion_vol': comp_data_ui['proportion_vol']
+                })
+
+            cut_definitions_input = []
+            if "Nombre del Corte" not in st.session_state.edited_cuts_df.columns or \
+               "Temperatura Final (°C)" not in st.session_state.edited_cuts_df.columns:
+                st.error("Las columnas de definición de cortes no son correctas. Se esperan 'Nombre del Corte' y 'Temperatura Final (°C)'.")
+                st.stop()
+            for _, row in st.session_state.edited_cuts_df.iterrows():
+                 if pd.notna(row["Nombre del Corte"]) and pd.notna(row["Temperatura Final (°C)"]):
+                    cut_definitions_input.append(
+                        (str(row["Nombre del Corte"]), float(row["Temperatura Final (°C)"]))
+                    )
+            if not cut_definitions_input:
+                st.error("No se han definido cortes válidos. Añada al menos un corte en la pestaña 'Cortes Esperados'.")
+                st.stop()
+
+            with st.spinner("Realizando cálculos..."):
+                temp_crude_to_process = None
+                if len(crude_components_for_logic) == 1:
+                    single_crude_data = crude_components_for_logic[0]
+                    temp_crude_to_process = CrudeOil(
+                        name=single_crude_data['name'], api_gravity=single_crude_data['api'],
+                        sulfur_content_wt_percent=single_crude_data['sulfur'],
+                        distillation_data_percent_vol_temp_C=single_crude_data['distillation_data'], verbose=False
+                    )
+                else:
+                    temp_crude_to_process = create_blend_from_crudes(crude_components_for_logic, verbose=False)
+                current_api_sensitivity_factor = st.session_state.api_sensitivity_factor                # Buscar datos empíricos si no es una mezcla                empirical_data = None
+                if not temp_crude_to_process.is_blend:
+                    empirical_data = st.session_state.empirical_mgr.get_crude_distribution(
+                        temp_crude_to_process.name,
+                        temp_crude_to_process.api
+                    )
+                    if empirical_data:
+                        st.info(f"Usando distribución empírica guardada para {temp_crude_to_process.name}")
+                
+                temp_calculated_cuts_objects = calculate_distillation_cuts(
+                    temp_crude_to_process, cut_definitions_input, verbose=False,
+                    api_sensitivity_factor=current_api_sensitivity_factor,
+                    empirical_data=empirical_data
+                )
+            st.session_state.crude_to_process = temp_crude_to_process
+            st.session_state.calculated_cuts_objects = temp_calculated_cuts_objects
+            st.session_state.api_sensitivity_factor_display = current_api_sensitivity_factor
+            st.session_state.manual_edits_valid = True # Resetear validación para nuevos cálculos
+            st.success("Cálculos completados.")
+            st.rerun()
+        except ValueError as e:
+            st.error(f"Error en los datos de entrada o cálculo: {e}")
+        except Exception as e:
+            st.error(f"Ocurrió un error inesperado durante el cálculo: {e}")
+            st.exception(e)
+    
+    active_crude_to_process = st.session_state.crude_to_process
+    active_calculated_cuts = st.session_state.calculated_cuts_objects
+    active_api_factor_display = st.session_state.api_sensitivity_factor_display
+
+    if not active_crude_to_process or not active_calculated_cuts:
+        st.info("Configure la alimentación y los cortes en las pestañas anteriores, luego haga clic en 'Calcular Cortes y Propiedades' (en la pestaña 'Crudos y Mezcla') para ver los resultados.")
+    else:
+        st.subheader(f"Resumen de la Alimentación Procesada: '{active_crude_to_process.name}'")
+        st.markdown(f"""
+        - **API:** {active_crude_to_process.api:.1f}, **SG:** {active_crude_to_process.sg:.4f}
+        - **Azufre Total:** {active_crude_to_process.sulfur_total_wt_percent:.4f} %peso
+        - **IBP:** {active_crude_to_process.ibp_C:.1f} °C, **FBP (Curva):** {active_crude_to_process.fbp_C:.1f} °C (al {active_crude_to_process.max_recovery_percent:.1f}% rec.)
+        - **T50:** {active_crude_to_process.t50_C:.1f} °C
+        """)
+        if active_api_factor_display is not None:
+            st.info(f"Cálculos originales realizados con Factor de Sensibilidad API: {active_api_factor_display:.1f}")
+
+        st.subheader("Propiedades de los Cortes Calculados")
+        
+        # Crear DataFrame con los resultados
+        results_df_display = pd.DataFrame([
+            {
+                "Corte": cut.name,
+                "Rend. Vol (%)": cut.yield_vol_percent,
+                "Rend. Peso (%)": cut.yield_wt_percent,
+                "API": cut.api_cut,
+                "SG": cut.sg_cut,
+                "Azufre (%peso)": cut.sulfur_cut_wt_percent,
+                "VABP (°C)": cut.vabp_C
+            } for cut in active_calculated_cuts
+        ])
+
+        # Dividir la pantalla en dos columnas
+        col1, col2 = st.columns([3, 2])
+        
+        with col1:
+            # Tabla de resultados más compacta
+            st.dataframe(
+                results_df_display,
+                hide_index=True,
+                column_config={
+                    "Corte": st.column_config.TextColumn(width="medium"),
+                    "Rend. Vol (%)": st.column_config.NumberColumn(format="%.2f%%", width="small"),
+                    "Rend. Peso (%)": st.column_config.NumberColumn(format="%.2f%%", width="small"),
+                    "API": st.column_config.NumberColumn(format="%.1f", width="small"),
+                    "SG": st.column_config.NumberColumn(format="%.4f", width="small"),
+                    "Azufre (%peso)": st.column_config.NumberColumn(format="%.4f", width="small"),
+                    "VABP (°C)": st.column_config.NumberColumn(format="%.1f", width="small")
+                },
+                use_container_width=True,
+                height=(len(results_df_display) + 1) * 35 + 3
+            )
+        
+        with col2:
+            # Gráfico de barras más compacto y estético
+            fig_cuts_results = px.bar(
+                results_df_display,
+                x="Corte",
+                y="Rend. Vol (%)",
+                title="Rendimientos Volumétricos",
+                labels={"Rend. Vol (%)": "Rendimiento (%)", "Corte": ""},
+                text="Rend. Vol (%)",  # Mostrar valores en las barras
+                template="plotly_white"  # Tema más limpio
+            )
+            fig_cuts_results.update_traces(
+                texttemplate='%{text:.2f}%',  # Dos decimales
+                textposition='outside',
+                marker_color='rgb(49, 130, 189)'
+            )
+            fig_cuts_results.update_layout(
+                height=400,
+                showlegend=False,
+                xaxis_tickangle=-45,
+                margin=dict(l=10, r=50, t=40, b=80),  # Más margen derecho
+                yaxis=dict(
+                    range=[0, max(results_df_display["Rend. Vol (%)"]) * 1.15]  # 15% más de espacio arriba
+                ),
+                uniformtext=dict(mode="hide", minsize=10),  # Ocultar etiquetas si no caben
+                yaxis_title="Rendimiento (%)",
+                xaxis_title=""
+            )
+            st.plotly_chart(fig_cuts_results, use_container_width=True, key="results_cuts_vol_chart")
+
+        # Curvas de destilación en una nueva sección
+        st.subheader("Curvas de Destilación")
+        
+        # Crear dos pestañas para las curvas
+        curve_tabs = st.tabs(["Curvas de Alimentación", "Curvas de Productos"])
+        
+        with curve_tabs[0]:
+            # Curvas de destilación de componentes (como estaba antes)
+            st.caption("Curvas TBP de la alimentación")
+            fig_dist = px.line(
+                pd.concat([
+                    pd.DataFrame({
+                        "Volumen (%)": crude_comp_ui_data['dist_curve']["Volumen (%)"],
+                        "Temperatura (°C)": crude_comp_ui_data['dist_curve']["Temperatura (°C)"],
+                        "Componente": crude_comp_ui_data.get('name', f'Componente {i+1}')
+                    }) for i, crude_comp_ui_data in enumerate(st.session_state.crude_components)
+                    if isinstance(crude_comp_ui_data.get('dist_curve'), pd.DataFrame)
+                ]),
+                x="Volumen (%)",
+                y="Temperatura (°C)",
+                color="Componente",
+                title="Curvas de Destilación TBP - Alimentación",
+                template="plotly_white"
+            )
+            
+            fig_dist.update_layout(
+                height=400,
+                margin=dict(l=10, r=150, t=40, b=40),  # Margen derecho ampliado para la leyenda
+                legend=dict(
+                    yanchor="top",
+                    y=0.98,
+                    xanchor="left",
+                    x=1.05,  # Mueve la leyenda fuera del gráfico
+                    bgcolor="rgba(0, 0, 0, 0)",  # Fondo transparente
+                    bordercolor="rgba(0, 0, 0, 0)",  # Sin borde
+                    font=dict(size=12)
+                ),
+                xaxis_title="Volumen (%)",
+                yaxis_title="Temperatura (°C)"
+            )
+            st.plotly_chart(fig_dist, use_container_width=True)
+        
+        with curve_tabs[1]:
+            # Curvas de destilación de los cortes
+            st.caption("Curvas de destilación estimadas para cada corte")
+            
+            # Recopilar datos de curvas de destilación de los cortes
+            cuts_dist_data_list = []
+            for cut in active_calculated_cuts:
+                dist_data = cut.get_distillation_data()
+                if not dist_data.empty and cut.yield_vol_percent > 1e-6:  # Solo incluir cortes con rendimiento
+                    dist_data['Corte'] = cut.name
+                    dist_data['VABP (°C)'] = cut.vabp_C if cut.vabp_C is not None else 0
+                    cuts_dist_data_list.append(dist_data)
+            
+            if cuts_dist_data_list:
+                cuts_dist_data = pd.concat(cuts_dist_data_list, ignore_index=True)
+                fig_cuts_dist = px.line(
+                    cuts_dist_data,
+                    x="Volumen (%)",
+                    y="Temperatura (°C)",
+                    color="Corte",
+                    title="Curvas de Destilación Estimadas - Productos",
+                    template="plotly_white"
+                )
+                
+                # Actualizar el ancho de línea usando update_traces
+                fig_cuts_dist.update_traces(line=dict(width=2))
+                
+                # Añadir marcadores para VABP
+                vabp_data = cuts_dist_data.drop_duplicates("Corte")[["Corte", "VABP (°C)"]]
+                if not vabp_data.empty:
+                    fig_cuts_dist.add_trace(
+                        go.Scatter(
+                            x=[50] * len(vabp_data),
+                            y=vabp_data["VABP (°C)"],
+                            mode='markers',
+                            name='VABP',
+                            marker=dict(
+                                size=12, 
+                                symbol='star',
+                                color='yellow',
+                                line=dict(color='black', width=1)
+                            ),
+                            showlegend=False
+                        )
+                    )
+                
+                fig_cuts_dist.update_layout(
+                    height=400,
+                    margin=dict(l=10, r=150, t=40, b=40),  # Margen derecho ampliado para la leyenda
+                    legend=dict(
+                        yanchor="top",
+                        y=0.98,
+                        xanchor="left",
+                        x=1.05,  # Mueve la leyenda fuera del gráfico
+                        bgcolor="rgba(0, 0, 0, 0)",  # Fondo transparente
+                        bordercolor="rgba(0, 0, 0, 0)",  # Sin borde
+                        font=dict(size=12)
+                    ),
+                    xaxis_title="Volumen (%)",
+                    yaxis_title="Temperatura (°C)"
+                )
+                
+                # Ajustar el rango de los ejes para mejor visualización
+                max_temp = cuts_dist_data["Temperatura (°C)"].max()
+                min_temp = cuts_dist_data["Temperatura (°C)"].min()
+                padding_temp = (max_temp - min_temp) * 0.05  # 5% de padding
+                
+                fig_cuts_dist.update_yaxes(
+                    range=[min_temp - padding_temp, max_temp + padding_temp]
+                )
+                
+                st.plotly_chart(fig_cuts_dist, use_container_width=True)
+                
+                st.caption("""
+                **Nota sobre las curvas de destilación estimadas:**
+                - Las curvas son estimaciones basadas en el rango de ebullición y VABP de cada corte
+                - Se usa una distribución sigmoidea para simular el comportamiento real
+                - Las estrellas amarillas (★) indican el VABP de cada corte
+                - Solo se muestran los cortes con rendimiento volumétrico > 0
+                - Las curvas son aproximadas y sirven como referencia visual
+                """)
+            else:
+                st.info("No hay datos suficientes para generar las curvas de destilación de los cortes o todos los cortes tienen rendimiento cero.")
+
+        st.markdown("---")
+        st.subheader("Ajustes Manuales de Cortes")
+        st.markdown("Modifique los rendimientos y el contenido de azufre. Los cambios se reflejan en `st.session_state` y se usan al recalcular balances.")
+        st.caption("""
+        **Nota sobre el "Aprendizaje" del Modelo:**
+        Los valores que modifica aquí son considerados datos empíricos y tienen precedencia sobre los cálculos teóricos iniciales para este conjunto de resultados.
+        Estos ajustes se utilizan para los balances generales que se muestran a continuación.
+        Sin embargo, estos ajustes manuales **no alteran los parámetros del modelo de cálculo fundamental** (ej. el factor de sensibilidad API o las correlaciones de distribución).
+        Si vuelve a ejecutar los cálculos desde la pestaña "Crudos y Mezcla" (botón "Calcular Cortes y Propiedades"), los resultados se generarán nuevamente usando el modelo teórico original,
+        y cualquier ajuste manual realizado previamente en esta tabla para una corrida anterior se perderá para la nueva corrida.
+        """)
+
+        manual_adjustments_data_for_editor = []
+        if active_calculated_cuts:
+            manual_adjustments_data_for_editor = [
+                {"Corte": cut.name, "Rend. Vol (%)": cut.yield_vol_percent,
+                 "Rend. Peso (%)": cut.yield_wt_percent, "Azufre (%peso)": cut.sulfur_cut_wt_percent}
+                for cut in active_calculated_cuts
+            ]
+        
+        if not manual_adjustments_data_for_editor:
+            st.warning("No hay cortes calculados disponibles para ajustar manualmente.")
+        else:
+            manual_adjustments_df_editor_input = pd.DataFrame(manual_adjustments_data_for_editor)
+            editor_key = f"manual_adjustments_editor_{len(active_calculated_cuts)}_{sum(c.yield_vol_percent for c in active_calculated_cuts)}"
+
+            # Mostrar advertencias de validación previas si existen
+            if not st.session_state.manual_edits_valid:
+                 st.error("Existen errores en los ajustes manuales. Por favor, corríjalos antes de aplicar.")
+
+
+            edited_df_from_data_editor = st.data_editor(
+                manual_adjustments_df_editor_input,
+                key=editor_key, 
+                column_config={
+                    "Corte": st.column_config.TextColumn(disabled=True),
+                    "Rend. Vol (%)": st.column_config.NumberColumn(format="%.2f%%", min_value=0.0, step=0.01), # Añadido %
+                    "Rend. Peso (%)": st.column_config.NumberColumn(format="%.2f%%", min_value=0.0, step=0.01), # Añadido %
+                    "Azufre (%peso)": st.column_config.NumberColumn(format="%.4f", min_value=0.0, step=0.0001)
+                },
+                use_container_width=True
+            )
+
+            # --- Validaciones Interactivas y Lógica de Actualización ---
+            current_edits_are_valid = True # Asumir validez inicial para esta ronda de edición
+            
+            # Validación 1: Suma de Rendimientos Volumétricos
+            if active_crude_to_process:
+                current_total_vol_yield_edited = edited_df_from_data_editor["Rend. Vol (%)"].sum()
+                max_permissible_yield = active_crude_to_process.max_recovery_percent
+                if current_total_vol_yield_edited > max_permissible_yield + 0.1: # 0.1% de tolerancia
+                    st.warning(f"Validación Fallida: La suma de Rendimientos Volumétricos ajustados ({current_total_vol_yield_edited:.2f}%) "
+                               f"excede el máximo recuperable del crudo ({max_permissible_yield:.2f}%). "
+                               f"Los cambios no se aplicarán hasta que esto se corrija.")
+                    current_edits_are_valid = False
+            
+            # Validación 2: Balance de Azufre (Advertencia, no bloqueante para la actualización directa)
+            if active_crude_to_process:
+                temp_total_wt_yield_edited = edited_df_from_data_editor["Rend. Peso (%)"].sum()
+                sulfur_in_products_edited = 0
+                for _, edited_row in edited_df_from_data_editor.iterrows():
+                    sulfur_in_products_edited += (float(edited_row["Azufre (%peso)"]) * float(edited_row["Rend. Peso (%)"])) / 100.0
+                expected_sulfur_from_crude = (active_crude_to_process.sulfur_total_wt_percent * temp_total_wt_yield_edited) / 100.0
+                if sulfur_in_products_edited > expected_sulfur_from_crude * 1.1 + 0.01: # Tolerancia aumentada a 10% + 0.01 abs
+                    st.warning(f"Advertencia de Balance de Azufre: El azufre total en los productos ajustados ({sulfur_in_products_edited:.4f} % sobre crudo) "
+                               f"es significativamente mayor que el azufre esperado de la alimentación procesada ({expected_sulfur_from_crude:.4f} % sobre crudo, basado en el rendimiento en peso ajustado). "
+                               f"Verifique los datos de azufre de los cortes.")
+            
+            st.session_state.manual_edits_valid = current_edits_are_valid # Actualizar estado de validación global para esta edición
+
+            # Lógica para actualizar el estado de la sesión si los datos editados son diferentes Y válidos
+            needs_update_in_session_state = False
+            updated_cuts_list_for_session = []
+            original_cuts_map_for_update = {cut.name: cut for cut in active_calculated_cuts}
+
+            if len(edited_df_from_data_editor) != len(active_calculated_cuts):
+                needs_update_in_session_state = True 
+
+            for index, edited_row_series in edited_df_from_data_editor.iterrows():
+                cut_name_from_editor = edited_row_series["Corte"]
+                if cut_name_from_editor in original_cuts_map_for_update:
+                    original_cut_obj = original_cuts_map_for_update[cut_name_from_editor]
+                    if not (np.isclose(original_cut_obj.yield_vol_percent, edited_row_series["Rend. Vol (%)"]) and
+                            np.isclose(original_cut_obj.yield_wt_percent, edited_row_series["Rend. Peso (%)"]) and
+                            np.isclose(original_cut_obj.sulfur_cut_wt_percent, edited_row_series["Azufre (%peso)"])):
+                        needs_update_in_session_state = True
+                    
+                    if current_edits_are_valid: # Solo actualizar el objeto si la validación crítica de esta ronda pasó
+                        original_cut_obj.yield_vol_percent = float(edited_row_series["Rend. Vol (%)"])
+                        original_cut_obj.yield_wt_percent = float(edited_row_series["Rend. Peso (%)"])
+                        original_cut_obj.set_sulfur_properties(float(edited_row_series["Azufre (%peso)"]))
+                    updated_cuts_list_for_session.append(original_cut_obj) # Siempre reconstruir la lista para reflejar el editor
+
+            if len(updated_cuts_list_for_session) != len(active_calculated_cuts) and not needs_update_in_session_state:
+                 needs_update_in_session_state = True
+
+            if needs_update_in_session_state and current_edits_are_valid:
+                st.session_state.calculated_cuts_objects = updated_cuts_list_for_session
+                st.rerun() 
+            elif needs_update_in_session_state and not current_edits_are_valid:
+                # Los datos cambiaron pero no son válidos. No actualizamos st.session_state.calculated_cuts_objects.
+                # El rerun ocurrirá naturalmente por la interacción con el widget,
+                # mostrando las advertencias y los datos no válidos en el editor.
+                pass
+
+
+            if st.button("Aplicar Ajustes y Recalcular Balances", type="primary", use_container_width=True, disabled=not st.session_state.manual_edits_valid):
+                if not st.session_state.calculated_cuts_objects: 
+                    st.warning("No hay cortes ajustados para aplicar. Realice cálculos primero.")
+                elif not st.session_state.manual_edits_valid: # Doble chequeo, aunque el botón debería estar deshabilitado
+                    st.error("No se pueden aplicar los ajustes porque hay errores de validación pendientes. Por favor, corríjalos.")
+                else:
+                    try:
+                        st.markdown("---")
+                        st.subheader("Balances Generales con Ajustes Manuales Aplicados")
+                        current_adjusted_cuts = st.session_state.calculated_cuts_objects
+                        total_yield_vol_adjusted = sum(cut.yield_vol_percent for cut in current_adjusted_cuts)
+                        total_yield_wt_adjusted = sum(cut.yield_wt_percent if cut.yield_wt_percent is not None else 0 for cut in current_adjusted_cuts)
+                        
+                        st.metric(label="Suma Rendimiento Volumétrico (Ajustado)", value=f"{total_yield_vol_adjusted:.2f}%",
+                                delta=(f"{total_yield_vol_adjusted - active_crude_to_process.max_recovery_percent:.2f}% vs "
+                                        f"Máx. Recuperado ({active_crude_to_process.max_recovery_percent:.2f}%)")
+                                        if active_crude_to_process else None,
+                                delta_color="off" if active_crude_to_process and np.isclose(total_yield_vol_adjusted, active_crude_to_process.max_recovery_percent, atol=0.1) else "normal")
+                        st.metric(label="Suma Rendimiento en Peso (Ajustado)", value=f"{total_yield_wt_adjusted:.2f}%")
+
+                        total_sulfur_in_cuts_mass_equivalent_adj = 0
+                        for cut in current_adjusted_cuts:
+                            if cut.sulfur_cut_wt_percent is not None and cut.yield_wt_percent is not None:
+                                total_sulfur_in_cuts_mass_equivalent_adj += (cut.sulfur_cut_wt_percent * cut.yield_wt_percent) / 100.0
+                        
+                        expected_total_sulfur_in_products_wt_on_crude_adj = 0
+                        if active_crude_to_process:
+                             expected_total_sulfur_in_products_wt_on_crude_adj = (active_crude_to_process.sulfur_total_wt_percent * total_yield_wt_adjusted) / 100.0
+                        
+                        delta_sulfur_adj = total_sulfur_in_cuts_mass_equivalent_adj - expected_total_sulfur_in_products_wt_on_crude_adj
+                        st.metric(label="Azufre Total Calculado en Productos (Ajustado)", 
+                                  value=f"{total_sulfur_in_cuts_mass_equivalent_adj:.4f}% (del crudo original)", 
+                                  delta=f"{delta_sulfur_adj:.4f}% vs Esperado",
+                                  delta_color="off" if np.isclose(delta_sulfur_adj, 0, atol=0.001) else "normal" )
+                        st.success("Balances recalculados con los ajustes manuales aplicados.")
+
+                        # Añadir visualización comparativa
+                        st.markdown("---")
+                        st.subheader("📊 Comparación de Distribuciones")
+                        st.markdown("""
+                        Compare los resultados del modelo teórico con los ajustes manuales aplicados.
+                        Estas visualizaciones ayudan a entender cómo los ajustes manuales difieren del modelo teórico.
+                        """)
+
+                        # Crear un DataFrame con las comparaciones
+                        comparison_data = []
+                        for cut in current_adjusted_cuts:
+                            # Obtener la distribución empírica (actual)
+                            empirical_cut = {
+                                "Corte": cut.name,
+                                "Rend. Vol (%)": cut.yield_vol_percent,
+                                "API": cut.api_cut,
+                                "Azufre (%peso)": cut.sulfur_cut_wt_percent,
+                                "Tipo": "Ajustado"
+                            }
+                            comparison_data.append(empirical_cut)
+
+                            # Recrear el corte con los cálculos teóricos
+                            theoretical_cut = DistillationCut(
+                                name=cut.name, 
+                                t_initial_C=cut.t_initial_C, 
+                                t_final_C=cut.t_final_C, 
+                                crude_oil_ref=active_crude_to_process)
+                            theoretical_cut.calculate_basic_properties(api_sensitivity_factor=active_api_factor_display)
+                            theoretical_data = {
+                                "Corte": cut.name,
+                                "Rend. Vol (%)": theoretical_cut.yield_vol_percent,
+                                "API": theoretical_cut.api_cut,
+                                "Azufre (%peso)": theoretical_cut.sulfur_cut_wt_percent,
+                                "Tipo": "Teórico"
+                            }
+                            comparison_data.append(theoretical_data)
+
+                        comparison_df = pd.DataFrame(comparison_data)
+
+                        # Crear pestañas para diferentes visualizaciones
+                        comp_tabs = st.tabs(["Rendimientos", "API", "Azufre"])
+
+                        with comp_tabs[0]:
+                            st.caption("Comparación de Rendimientos Volumétricos")
+                            fig_yields = px.bar(
+                                comparison_df,
+                                x="Corte",
+                                y="Rend. Vol (%)",
+                                color="Tipo",
+                                barmode="group",
+                                title="Rendimientos Volumétricos: Teórico vs Ajustado",
+                                template="plotly_white"
+                            )
+                            fig_yields.update_layout(
+                                height=400,
+                                xaxis_tickangle=-45,
+                                legend=dict(
+                                    yanchor="top",
+                                    y=0.98,
+                                    xanchor="left",
+                                    x=1.02,
+                                    bgcolor="rgba(0,0,0,0)"
+                                )
+                            )
+                            st.plotly_chart(fig_yields, use_container_width=True)
+
+                        with comp_tabs[1]:
+                            st.caption("Comparación de Gravedades API")
+                            fig_api = px.line(
+                                comparison_df,
+                                x="Corte",
+                                y="API",
+                                color="Tipo",
+                                markers=True,
+                                title="Gravedades API: Teórico vs Ajustado",
+                                template="plotly_white"
+                            )
+                            fig_api.update_layout(
+                                height=400,
+                                xaxis_tickangle=-45,
+                                legend=dict(
+                                    yanchor="top",
+                                    y=0.98,
+                                    xanchor="left",
+                                    x=1.02,
+                                    bgcolor="rgba(0,0,0,0)"
+                                )
+                            )
+                            st.plotly_chart(fig_api, use_container_width=True)
+
+                        with comp_tabs[2]:
+                            st.caption("Comparación de Contenido de Azufre")
+                            fig_sulfur = px.line(
+                                comparison_df,
+                                x="Corte",
+                                y="Azufre (%peso)",
+                                color="Tipo",
+                                markers=True,
+                                title="Contenido de Azufre: Teórico vs Ajustado",
+                                template="plotly_white"
+                            )
+                            fig_sulfur.update_layout(
+                                height=400,
+                                xaxis_tickangle=-45,
+                                legend=dict(
+                                    yanchor="top",
+                                    y=0.98,
+                                    xanchor="left",
+                                    x=1.02,
+                                    bgcolor="rgba(0,0,0,0)"
+                                )
+                            )
+                            st.plotly_chart(fig_sulfur, use_container_width=True)
+
+                        st.caption("""
+                        **Notas sobre las comparaciones:**
+                        - Los gráficos muestran las diferencias entre los resultados del modelo teórico y los ajustes manuales
+                        - Las barras/líneas azules muestran los valores teóricos calculados por el modelo
+                        - Las barras/líneas rojas muestran los valores ajustados manualmente
+                        - Estas visualizaciones ayudan a identificar patrones y mejorar el modelo teórico
+                        """)
+                        
+                        # Botón para guardar distribución empírica
+                        st.markdown("---")
+                        st.subheader("💾 Guardar Distribución Empírica")
+                        st.markdown("""
+                        Esta opción permite guardar los ajustes manuales como una distribución empírica para este crudo.
+                        Los datos guardados se pueden usar posteriormente cuando este crudo forme parte de una mezcla.
+                        Puede guardar múltiples escenarios para un mismo crudo asignándoles nombres diferentes.
+                        """)
+                        
+                        # Sección de guardado
+                        col1, col2 = st.columns([2, 1])
+                        with col1:
+                            scenario_name = st.text_input(
+                                "Nombre del escenario",
+                                value="",
+                                placeholder="Ingrese un nombre para el escenario (opcional)",
+                                key="save_scenario_name"
+                            )
+                        with col2:
+                            save_button = st.button("💾 Guardar Escenario", type="primary", use_container_width=True)
+                        
+                        if save_button:
+                            try:
+                                empirical_data = {
+                                    "cuts": [
+                                        {
+                                            "name": cut.name,
+                                            "yield_vol": cut.yield_vol_percent,
+                                            "yield_wt": cut.yield_wt_percent,
+                                            "api": cut.api_cut,
+                                            "sulfur": cut.sulfur_cut_wt_percent,
+                                            "vabp": cut.vabp_C,
+                                            "t_initial": cut.t_initial_C,
+                                            "t_final": cut.t_final_C
+                                        }
+                                        for cut in current_adjusted_cuts
+                                    ],
+                                    "metadata": {
+                                        "api_sensitivity_factor": active_api_factor_display,
+                                        "total_sulfur": active_crude_to_process.sulfur_total_wt_percent,
+                                        "description": "Escenario guardado manualmente"
+                                    }
+                                }
+                                st.session_state.empirical_mgr.save_crude_distribution(
+                                    crude_name=active_crude_to_process.name,
+                                    api=active_crude_to_process.api,
+                                    distribution_data=empirical_data,
+                                    scenario_name=scenario_name if scenario_name else None
+                                )
+                                st.success(f"✅ Distribución empírica guardada para {active_crude_to_process.name} "
+                                         f"(API: {active_crude_to_process.api:.1f})"
+                                         f"{f' - Escenario: {scenario_name}' if scenario_name else ''}")
+                            except Exception as e:
+                                st.error(f"Error al guardar distribución empírica: {e}")
+
+                        # Mostrar escenarios existentes para el crudo actual si hay alguno
+                        if active_crude_to_process:
+                            existing_scenarios = st.session_state.empirical_mgr.get_scenarios_for_crude(
+                                active_crude_to_process.name,
+                                active_crude_to_process.api
+                            )
+                            if existing_scenarios:
+                                st.markdown("#### Escenarios guardados para este crudo:")
+                                scenarios_data = []
+                                for scenario_name, last_updated in existing_scenarios:
+                                    last_updated_dt = datetime.fromisoformat(last_updated)
+                                    scenarios_data.append({
+                                        "Escenario": scenario_name if scenario_name != "default" else "Escenario por defecto",
+                                        "Última Actualización": last_updated_dt.strftime("%Y-%m-%d %H:%M")
+                                    })
+                                st.dataframe(
+                                    pd.DataFrame(scenarios_data),
+                                    hide_index=True,
+                                    use_container_width=True
+                                )
+                                
+                                # Opción para eliminar escenarios
+                                with st.expander("🗑️ Eliminar escenarios"):
+                                    st.warning("⚠️ Esta acción no se puede deshacer")
+                                    scenario_to_delete = st.selectbox(
+                                        "Seleccione el escenario a eliminar",
+                                        options=[s[0] for s in existing_scenarios],
+                                        format_func=lambda x: "Escenario por defecto" if x == "default" else x
+                                    )
+                                    if st.button("Eliminar escenario seleccionado", type="primary"):
+                                        if st.session_state.empirical_mgr.delete_distribution(
+                                            active_crude_to_process.name,
+                                            active_crude_to_process.api,
+                                            scenario_to_delete
+                                        ):
+                                            st.success(f"Escenario eliminado exitosamente")
+                                            st.rerun()
+                                        else:
+                                            st.error("No se pudo eliminar el escenario")
+
+                        # Sección de todas las distribuciones empíricas guardadas
+                        st.markdown("---")
+                        st.subheader("📚 Todas las Distribuciones Empíricas")
+                        st.markdown("""
+                        Aquí puede ver todas las distribuciones empíricas guardadas en el sistema.
+                        Esta información se usa automáticamente al calcular mezclas que incluyan estos crudos.
+                        """)
+
+                        # Obtener y mostrar las distribuciones disponibles
+                        available_distributions = st.session_state.empirical_mgr.list_available_distributions()
+                        if available_distributions:
+                            dist_data = []
+                            for name, api, scenario_name, last_updated in available_distributions:
+                                last_updated_dt = datetime.fromisoformat(last_updated)
+                                dist_data.append({
+                                    "Crudo": name,
+                                    "API": f"{api:.1f}",
+                                    "Escenario": scenario_name if scenario_name != "default" else "Escenario por defecto",
+                                    "Última Actualización": last_updated_dt.strftime("%Y-%m-%d %H:%M")
+                                })
+                            
+                            st.dataframe(
+                                pd.DataFrame(dist_data),
+                                hide_index=True,
+                                column_config={
+                                    "Crudo": st.column_config.TextColumn(width="medium"),
+                                    "API": st.column_config.TextColumn(width="small"),
+                                    "Escenario": st.column_config.TextColumn(width="medium"),
+                                    "Última Actualización": st.column_config.TextColumn(width="medium")
+                                },
+                                use_container_width=True
+                            )
+                            
+                            # Opción para eliminar distribuciones completas
+                            with st.expander("🗑️ Eliminar todas las distribuciones de un crudo"):
+                                st.warning("⚠️ Esta acción eliminará TODOS los escenarios del crudo seleccionado y no se puede deshacer")
+                                unique_crudes = list(set((name, api) for name, api, _, _ in available_distributions))
+                                crude_to_delete = st.selectbox(
+                                    "Seleccione el crudo a eliminar",
+                                    options=unique_crudes,
+                                    format_func=lambda x: f"{x[0]} (API: {x[1]:.1f})"
+                                )
+                                if st.button("Eliminar todas las distribuciones del crudo seleccionado", type="primary"):
+                                    if st.session_state.empirical_mgr.delete_distribution(
+                                        crude_to_delete[0],
+                                        crude_to_delete[1]
+                                    ):
+                                        st.success(f"Todas las distribuciones de {crude_to_delete[0]} han sido eliminadas")
+                                        st.rerun()
+                                    else:
+                                        st.error("No se pudieron eliminar las distribuciones")
+                        else:
+                            st.info("No hay distribuciones empíricas guardadas todavía.")
