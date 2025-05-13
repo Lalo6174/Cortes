@@ -29,9 +29,6 @@ except ImportError as e:
 # --- Inicialización de Estado ---
 initialize_session_state() # Llama a la función de ui_logic.py
 
-# Asegurar que todos los componentes tengan los campos necesarios después de la inicialización
-# No es necesario pre-inicializar 'uploaded_file_key_X' en session_state para la *clave* del uploader,
-# ya que la generaremos directamente en el bucle.
 for comp in st.session_state.crude_components:
     comp_id = comp['id']
     if f"load_from_scenario_{comp_id}" not in st.session_state: st.session_state[f"load_from_scenario_{comp_id}"] = "Ingresar datos manualmente"
@@ -224,8 +221,6 @@ with tabs[0]: # Alimentación y Escenarios
             })
             st.session_state[f"load_from_scenario_{new_id}"] = "Ingresar datos manualmente"
             st.session_state[f"selected_scenario_key_{new_id}"] = None
-            # No es necesario gestionar 'uploaded_file_key_X' en session_state para la *clave* del uploader.
-            # La clave se generará dinámicamente.
             st.session_state.next_crude_id += 1; st.rerun()
     with col2_btn_c:
         if num_crudes > 0 and st.button("➖ Eliminar Último Componente", use_container_width=True, key="remove_comp_button_main_v3"):
@@ -279,8 +274,6 @@ with tabs[0]: # Alimentación y Escenarios
                     comp_state["loaded_scenario_type"] = stype_load
                     comp_state["data_source_type"] = "scenario"
                     st.session_state[f"selected_scenario_key_{comp_id}"] = selected_source
-                    # No es necesario resetear el uploader aquí de esta manera:
-                    # st.session_state[st.session_state[f"uploaded_file_key_{comp_id}"]] = None 
                     st.success(f"Datos cargados para Comp. {i+1} desde: {selected_source}"); st.rerun()
                 else:
                     st.error(f"No se pudo cargar el escenario: {selected_source}")
@@ -311,20 +304,51 @@ with tabs[0]: # Alimentación y Escenarios
 
             st.markdown(f"##### Curva de Destilación ({comp_state['distillation_curve_type']})")
             
-            # --- File Uploader para la curva de destilación ---
-            # Usar una clave simple y fija por componente para el uploader
             uploader_key_string = f"dist_curve_uploader_comp_{comp_id}"
             
             uploaded_file = st.file_uploader(
-                "Cargar CSV para Curva", # Etiqueta más corta
+                "Cargar CSV para Curva", 
                 type=["csv"],
                 key=uploader_key_string, 
-                help="CSV con columnas 'Volumen (%)' y 'Temperatura (°C)'."
+                help="CSV con columnas 'Volumen (%)' y 'Temperatura (°C)' (o equivalentes en inglés)."
             )
 
             if uploaded_file is not None:
-                try:
-                    df_uploaded = pd.read_csv(uploaded_file)
+                df_uploaded = None
+                # Intentar leer con diferentes codificaciones comunes
+                encodings_to_try = ['utf-8', 'latin1', 'iso-8859-1', 'windows-1252']
+                for encoding in encodings_to_try:
+                    try:
+                        uploaded_file.seek(0) 
+                        # Intentar detectar separador automáticamente y manejar espacios
+                        df_uploaded = pd.read_csv(uploaded_file, encoding=encoding, sep=None, engine='python', skipinitialspace=True)
+                        logging.info(f"CSV '{uploaded_file.name}' leído con encoding '{encoding}' y detector de sep.")
+                        break 
+                    except UnicodeDecodeError:
+                        logging.warning(f"Fallo al decodificar CSV '{uploaded_file.name}' con encoding '{encoding}'.")
+                        df_uploaded = None
+                    except Exception as e_read: 
+                        logging.error(f"Error leyendo CSV '{uploaded_file.name}' con encoding '{encoding}': {e_read}")
+                        df_uploaded = None
+                        break 
+
+                if df_uploaded is not None:
+                    # Limpiar nombres de columnas (quitar espacios extra)
+                    df_uploaded.columns = df_uploaded.columns.str.strip()
+
+                    # Mapeo de posibles nombres de columnas (inglés/español) a los nombres estándar en español
+                    column_name_map = {
+                        "Volume (%)": "Volumen (%)",
+                        "Vol (%)": "Volumen (%)",
+                        "Temperature (°C)": "Temperatura (°C)",
+                        "Temp (°C)": "Temperatura (°C)",
+                        "Temperature (C)": "Temperatura (°C)",
+                        # Mantener los nombres en español por si ya vienen así
+                        "Volumen (%)": "Volumen (%)",
+                        "Temperatura (°C)": "Temperatura (°C)"
+                    }
+                    df_uploaded.rename(columns=column_name_map, inplace=True)
+
                     if "Volumen (%)" in df_uploaded.columns and "Temperatura (°C)" in df_uploaded.columns:
                         df_uploaded["Volumen (%)"] = pd.to_numeric(df_uploaded["Volumen (%)"], errors='coerce')
                         df_uploaded["Temperatura (°C)"] = pd.to_numeric(df_uploaded["Temperatura (°C)"], errors='coerce')
@@ -335,15 +359,12 @@ with tabs[0]: # Alimentación y Escenarios
                         if len(df_uploaded) >= 2:
                             comp_state["dist_curve"] = df_uploaded[["Volumen (%)", "Temperatura (°C)"]].copy()
                             st.success(f"Curva cargada desde '{uploaded_file.name}' para Comp. {i+1}.")
-                            # Para "limpiar" el uploader, la forma más efectiva es que el usuario lo haga manualmente
-                            # o cambiar la clave del uploader en un rerun, lo cual puede ser complejo de manejar.
-                            # Por ahora, el archivo permanecerá seleccionado hasta que el usuario lo cambie o elimine.
                         else:
-                            st.warning(f"CSV '{uploaded_file.name}' sin datos válidos (>= 2 puntos).")
+                            st.warning(f"CSV '{uploaded_file.name}' sin datos válidos (>= 2 puntos después de procesar).")
                     else:
-                        st.error(f"CSV '{uploaded_file.name}' sin columnas 'Volumen (%)' y 'Temperatura (°C)'.")
-                except Exception as e_upload:
-                    st.error(f"Error procesando CSV '{uploaded_file.name}': {e_upload}")
+                        st.error(f"CSV '{uploaded_file.name}' no contiene las columnas esperadas (Volumen y Temperatura) incluso después de intentar mapear nombres comunes. Columnas encontradas: {list(df_uploaded.columns)}")
+                else:
+                    st.error(f"No se pudo leer o decodificar el archivo CSV '{uploaded_file.name}' con las codificaciones y separadores probados. Verifique el formato y la codificación del archivo.")
 
 
             if not isinstance(comp_state.get("dist_curve"),pd.DataFrame):
