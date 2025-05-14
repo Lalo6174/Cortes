@@ -13,6 +13,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from empirical_data import EmpiricalDistributionManager
 import logging
 import io # Necesario para leer el archivo cargado
+import time # <--- AÑADIDO PARA LA PAUSA
 
 # --- Importaciones de Módulos Locales ---
 try:
@@ -103,7 +104,7 @@ def save_refinery_scenario_ui(original_feed: Optional[CrudeOil],
              vac_feed_for_check = st.session_state.get('vacuum_feed_object')
              for cut_obj in current_final_product_objects:
                  prod_dict = cut_obj.to_dict()
-                 is_vac_product = vac_feed_for_check and any(vp.name == cut_obj.name for vp in current_vac_products_objs if vp) # Check if vp is not None
+                 is_vac_product = vac_feed_for_check and any(vp.name == cut_obj.name for vp in current_vac_products_objs if vp) 
                  prod_dict["Origen del Producto"] = "Vacío" if is_vac_product else "Atmosférico"
                  if prod_dict["Origen del Producto"] == "Vacío" and cut_obj.yield_vol_percent is not None:
                      prod_dict["Rend. Vol (%) en Crudo Orig."] = (cut_obj.yield_vol_percent / 100.0) * atm_res_yield_on_crude_frac * 100.0
@@ -205,10 +206,8 @@ with tabs[0]: # Alimentación y Escenarios
     st.header("🛢️ Definición de Alimentación y Gestión de Escenarios")
     show_scenario_management_ui(st.session_state.empirical_mgr)
     st.markdown("---"); st.subheader("Componentes de la Alimentación Principal")
-
-    num_crudes = len(st.session_state.crude_components)
     
-    if st.button("➕ Añadir Componente a Alimentación", use_container_width=True, key="add_comp_button_main_v4"):
+    if st.button("➕ Añadir Componente a Alimentación", use_container_width=True, key="add_comp_button_main_v5"):
         new_id = st.session_state.next_crude_id
         st.session_state.crude_components.append({
             "id": new_id, "name": f"Componente {new_id}", "api": 30.0, "sulfur": 0.5,
@@ -223,13 +222,7 @@ with tabs[0]: # Alimentación y Escenarios
         st.session_state.next_crude_id += 1
         st.rerun()
 
-    if st.session_state.crude_components:
-        current_total_proportion = sum(float(c.get('proportion_vol', 0.0)) for c in st.session_state.crude_components)
-        sum_color = "green" if np.isclose(current_total_proportion, 100.0) else "red"
-        st.markdown(f"**Suma de Proporciones Actual:** <span style='color:{sum_color}; font-weight:bold;'>{current_total_proportion:.2f}%</span> (Objetivo: 100%)", unsafe_allow_html=True)
-
     crude_data_valid_overall = True
-    component_crudes_for_processing = []
     all_scenarios_flat = st.session_state.empirical_mgr.list_all_scenarios_flat()
     distillation_curve_type_options = ["TBP", "ASTM D86", "ASTM D1160", "ASTM D2887", "ASTM D7169"]
 
@@ -237,96 +230,87 @@ with tabs[0]: # Alimentación y Escenarios
 
     for i, comp_state in enumerate(components_to_iterate):
         comp_id = comp_state['id']
-        st.markdown(f"--- \n### Componente: {comp_state.get('name', f'Comp {comp_id}')}")
-        
-        col_header_1, col_header_2 = st.columns([0.8, 0.2])
-        with col_header_1:
-            pass 
-        with col_header_2:
-            if st.button(f"🗑️ Eliminar Componente", key=f"delete_comp_btn_{comp_id}", use_container_width=True, type="secondary"):
-                st.session_state.crude_components = [c for c in st.session_state.crude_components if c['id'] != comp_id]
-                for key_prefix in ["load_from_scenario_", "selected_scenario_key_"]:
-                    if f"{key_prefix}{comp_id}" in st.session_state:
-                        del st.session_state[f"{key_prefix}{comp_id}"]
-                st.rerun()
+        with st.expander(f"Componente: {comp_state.get('name', f'Comp {comp_id}')}", expanded=True):
+            
+            col_delete_btn_1, col_delete_btn_2 = st.columns([0.8,0.2]) 
+            with col_delete_btn_2:
+                 if st.button(f"🗑️ Eliminar", key=f"delete_comp_btn_{comp_id}", use_container_width=True, type="secondary", help=f"Eliminar {comp_state.get('name')}"):
+                    st.session_state.crude_components = [c for c in st.session_state.crude_components if c['id'] != comp_id]
+                    for key_prefix in ["load_from_scenario_", "selected_scenario_key_"]:
+                        if f"{key_prefix}{comp_id}" in st.session_state:
+                            del st.session_state[f"{key_prefix}{comp_id}"]
+                    st.rerun()
 
-        data_source_key = f"load_from_scenario_{comp_id}"
-        load_options = ["Ingresar datos manualmente"]
-        scenario_map = {} 
-        for s_info in all_scenarios_flat:
-            pk, sn, stype = s_info['primary_key'], s_info['scenario_name'], s_info['scenario_type']
-            s_data = s_info.get('distribution_data', {})
-            feed_props_for_display = s_data.get('original_feed_properties', s_data) if stype == 'refinery_run' else s_data
-            name_disp = feed_props_for_display.get('name', pk)
-            api_val = feed_props_for_display.get('api','N/A') 
-            api_disp = f"{api_val:.1f}" if isinstance(api_val,(float,int)) else str(api_val)
-            curve_type_disp = feed_props_for_display.get('original_distillation_curve_type', 'TBP') 
-            label = f"Esc. {stype.replace('_',' ').capitalize()}: {name_disp} (API {api_disp}, Curva: {curve_type_disp}) - {sn}"
-            load_options.append(label); scenario_map[label] = (pk, sn, stype)
+            data_source_key = f"load_from_scenario_{comp_id}"
+            load_options = ["Ingresar datos manualmente"]
+            scenario_map = {} 
+            for s_info in all_scenarios_flat:
+                pk, sn, stype = s_info['primary_key'], s_info['scenario_name'], s_info['scenario_type']
+                s_data = s_info.get('distribution_data', {})
+                feed_props_for_display = s_data.get('original_feed_properties', s_data) if stype == 'refinery_run' else s_data
+                name_disp = feed_props_for_display.get('name', pk)
+                api_val = feed_props_for_display.get('api','N/A') 
+                api_disp = f"{api_val:.1f}" if isinstance(api_val,(float,int)) else str(api_val)
+                curve_type_disp = feed_props_for_display.get('original_distillation_curve_type', 'TBP') 
+                label = f"Esc. {stype.replace('_',' ').capitalize()}: {name_disp} (API {api_disp}, Curva: {curve_type_disp}) - {sn}"
+                load_options.append(label); scenario_map[label] = (pk, sn, stype)
 
-        current_sel_source = st.session_state.get(data_source_key, "Ingresar datos manualmente")
-        if current_sel_source != "Ingresar datos manualmente" and current_sel_source not in scenario_map:
-            current_sel_source = "Ingresar datos manualmente"; st.session_state[data_source_key] = current_sel_source
-        
-        selected_source = st.selectbox(f"Fuente de datos para '{comp_state.get('name')}':", load_options, index=load_options.index(current_sel_source), key=data_source_key, help="Elija manual o un escenario guardado.")
+            current_sel_source = st.session_state.get(data_source_key, "Ingresar datos manualmente")
+            if current_sel_source != "Ingresar datos manualmente" and current_sel_source not in scenario_map:
+                current_sel_source = "Ingresar datos manualmente"; st.session_state[data_source_key] = current_sel_source
+            
+            selected_source = st.selectbox(f"Fuente de datos:", load_options, index=load_options.index(current_sel_source), key=data_source_key, help="Elija manual o un escenario guardado.")
 
-        if selected_source != "Ingresar datos manualmente":
-            if st.session_state.get(f"selected_scenario_key_{comp_id}") != selected_source: 
-                pk_load, sn_load, stype_load = scenario_map[selected_source]
-                emp_data_payload = st.session_state.empirical_mgr.get_scenario_data(pk_load, sn_load)
-                if emp_data_payload:
-                    data_to_load_base = emp_data_payload.get('original_feed_properties', emp_data_payload) if stype_load == 'refinery_run' else emp_data_payload
-                    comp_state["name"] = data_to_load_base.get("name", pk_load)
-                    comp_state["api"] = data_to_load_base.get("api", 30.0) 
-                    comp_state["sulfur"] = data_to_load_base.get("sulfur", 0.5)
-                    dist_curve_original_loaded = data_to_load_base.get("original_distillation_data", [])
-                    comp_state["distillation_curve_type"] = data_to_load_base.get("original_distillation_curve_type", "TBP")
-                    comp_state["dist_curve"] = pd.DataFrame(
-                        [{"Volumen (%)":p[0],"Temperatura (°C)":p[1]} for p in dist_curve_original_loaded if isinstance(p,(list,tuple)) and len(p)==2]
-                    ) if dist_curve_original_loaded else pd.DataFrame([{"Volumen (%)":v,"Temperatura (°C)":None} for v in [0,10,30,50,70,90,95,100]])
-                    comp_state["loaded_scenario_cuts"] = emp_data_payload.get("final_products") if stype_load == 'refinery_run' else emp_data_payload.get("cuts") if stype_load == 'crude' else None
-                    comp_state["loaded_scenario_dist_curve"] = dist_curve_original_loaded 
-                    comp_state["loaded_scenario_type"] = stype_load
-                    comp_state["data_source_type"] = "scenario"
-                    st.session_state[f"selected_scenario_key_{comp_id}"] = selected_source
-                    st.success(f"Datos cargados para '{comp_state.get('name')}' desde: {selected_source}"); st.rerun()
-                else:
-                    st.error(f"No se pudo cargar el escenario: {selected_source}")
-                    comp_state["data_source_type"]="manual"; comp_state["loaded_scenario_cuts"]=None
-                    comp_state["loaded_scenario_dist_curve"]=None; comp_state["loaded_scenario_type"]=None
-        else: 
-            comp_state["data_source_type"]="manual"; comp_state["loaded_scenario_cuts"]=None
-            comp_state["loaded_scenario_dist_curve"]=None; comp_state["loaded_scenario_type"]=None
-            if st.session_state.get(f"selected_scenario_key_{comp_id}") is not None:
-                 st.session_state[f"selected_scenario_key_{comp_id}"]=None 
+            if selected_source != "Ingresar datos manualmente":
+                if st.session_state.get(f"selected_scenario_key_{comp_id}") != selected_source: 
+                    pk_load, sn_load, stype_load = scenario_map[selected_source]
+                    emp_data_payload = st.session_state.empirical_mgr.get_scenario_data(pk_load, sn_load)
+                    if emp_data_payload:
+                        data_to_load_base = emp_data_payload.get('original_feed_properties', emp_data_payload) if stype_load == 'refinery_run' else emp_data_payload
+                        comp_state["name"] = data_to_load_base.get("name", pk_load)
+                        comp_state["api"] = data_to_load_base.get("api", 30.0) 
+                        comp_state["sulfur"] = data_to_load_base.get("sulfur", 0.5)
+                        dist_curve_original_loaded = data_to_load_base.get("original_distillation_data", [])
+                        comp_state["distillation_curve_type"] = data_to_load_base.get("original_distillation_curve_type", "TBP")
+                        comp_state["dist_curve"] = pd.DataFrame(
+                            [{"Volumen (%)":p[0],"Temperatura (°C)":p[1]} for p in dist_curve_original_loaded if isinstance(p,(list,tuple)) and len(p)==2]
+                        ) if dist_curve_original_loaded else pd.DataFrame([{"Volumen (%)":v,"Temperatura (°C)":None} for v in [0,10,30,50,70,90,95,100]])
+                        comp_state["loaded_scenario_cuts"] = emp_data_payload.get("final_products") if stype_load == 'refinery_run' else emp_data_payload.get("cuts") if stype_load == 'crude' else None
+                        comp_state["loaded_scenario_dist_curve"] = dist_curve_original_loaded 
+                        comp_state["loaded_scenario_type"] = stype_load
+                        comp_state["data_source_type"] = "scenario"
+                        st.session_state[f"selected_scenario_key_{comp_id}"] = selected_source
+                        st.success(f"Datos cargados para '{comp_state.get('name')}' desde: {selected_source}"); st.rerun()
+                    else:
+                        st.error(f"No se pudo cargar el escenario: {selected_source}")
+                        comp_state["data_source_type"]="manual"; comp_state["loaded_scenario_cuts"]=None
+                        comp_state["loaded_scenario_dist_curve"]=None; comp_state["loaded_scenario_type"]=None
+            else: 
+                comp_state["data_source_type"]="manual"; comp_state["loaded_scenario_cuts"]=None
+                comp_state["loaded_scenario_dist_curve"]=None; comp_state["loaded_scenario_type"]=None
+                if st.session_state.get(f"selected_scenario_key_{comp_id}") is not None:
+                     st.session_state[f"selected_scenario_key_{comp_id}"]=None 
 
-        with st.container():
             if comp_state["data_source_type"] == "scenario": st.caption(f"Datos base cargados desde escenario. Puede modificarlos o cargar un CSV.")
             
-            c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 2]) 
-            comp_state["name"]=c1.text_input("Nombre",comp_state.get("name", f"Comp {comp_id}"),key=f"n{comp_id}_main_v4")
-            comp_state["api"]=c2.number_input("API",0.1,100.0,float(comp_state.get("api",30.0)),0.1,"%.1f",key=f"a{comp_id}_main_v4")
-            comp_state["sulfur"]=c3.number_input("Azufre %p",0.0,10.0,float(comp_state.get("sulfur",0.5)),0.01,"%.2f",key=f"s{comp_id}_main_v4")
-            comp_state["proportion_vol"]=c4.number_input("Prop. %vol",0.0,100.0,float(comp_state.get("proportion_vol",0.0)),0.1,"%.1f",key=f"p{comp_id}_main_v4") 
+            c1_comp, c2_comp, c3_comp = st.columns(3) 
+            comp_state["name"]=c1_comp.text_input("Nombre",comp_state.get("name", f"Comp {comp_id}"),key=f"n{comp_id}_main_v5_table")
+            comp_state["api"]=c2_comp.number_input("API",0.1,100.0,float(comp_state.get("api",30.0)),0.1,"%.1f",key=f"a{comp_id}_main_v5_table")
+            comp_state["sulfur"]=c3_comp.number_input("Azufre %p",0.0,10.0,float(comp_state.get("sulfur",0.5)),0.01,"%.2f",key=f"s{comp_id}_main_v5_table")
+            
             current_curve_type = comp_state.get("distillation_curve_type", "TBP")
             if current_curve_type not in distillation_curve_type_options: current_curve_type = "TBP"
-            comp_state["distillation_curve_type"] = c5.selectbox(
+            comp_state["distillation_curve_type"] = st.selectbox( 
                 "Tipo de Curva", options=distillation_curve_type_options,
                 index=distillation_curve_type_options.index(current_curve_type),
-                key=f"curvetype{comp_id}_main_v4",
-                help="Seleccione el tipo de curva de destilación que está ingresando o que espera del CSV."
+                key=f"curvetype{comp_id}_main_v5_table"
             )
 
-            st.markdown(f"##### Curva de Destilación ({comp_state['distillation_curve_type']}) para '{comp_state.get('name')}'")
+            st.markdown(f"##### Curva de Destilación ({comp_state['distillation_curve_type']})")
             
             uploader_key_string = f"dist_curve_uploader_comp_{comp_id}"
-            
-            uploaded_file = st.file_uploader(
-                "Cargar CSV para Curva", 
-                type=["csv"],
-                key=uploader_key_string, 
-                help="CSV con columnas 'Volumen (%)' y 'Temperatura (°C)' (o equivalentes en inglés)."
-            )
+            uploaded_file = st.file_uploader("Cargar CSV para Curva", type=["csv"], key=uploader_key_string, 
+                                             help="CSV con columnas 'Volumen (%)' y 'Temperatura (°C)' (o equivalentes en inglés).")
 
             if uploaded_file is not None:
                 df_uploaded = None
@@ -355,8 +339,6 @@ with tabs[0]: # Alimentación y Escenarios
                 
                 if success_reading and df_uploaded is not None:
                     df_uploaded.columns = df_uploaded.columns.str.strip().str.replace('\ufeff', '', regex=False)
-                    logging.info(f"Columnas después de strip y reemplazo de BOM: {df_uploaded.columns.tolist()}")
-
                     column_name_map = {
                         "Volume (%)": "Volumen (%)", "Vol (%)": "Volumen (%)", "Volumen": "Volumen (%)",
                         "Temperature (°C)": "Temperatura (°C)", "Temp (°C)": "Temperatura (°C)",
@@ -364,12 +346,10 @@ with tabs[0]: # Alimentación y Escenarios
                         "Volumen (%)": "Volumen (%)", "Temperatura (°C)": "Temperatura (°C)"
                     }
                     df_uploaded.rename(columns=column_name_map, inplace=True)
-                    logging.info(f"Columnas después del mapeo de nombres: {df_uploaded.columns.tolist()}")
 
                     if "Volumen (%)" in df_uploaded.columns and "Temperatura (°C)" in df_uploaded.columns:
                         df_uploaded["Volumen (%)"] = pd.to_numeric(df_uploaded["Volumen (%)"], errors='coerce')
                         df_uploaded["Temperatura (°C)"] = pd.to_numeric(df_uploaded["Temperatura (°C)"], errors='coerce')
-                        
                         df_uploaded = df_uploaded.dropna(subset=["Volumen (%)", "Temperatura (°C)"])
                         df_uploaded = df_uploaded[(df_uploaded["Volumen (%)"] >= 0) & (df_uploaded["Volumen (%)"] <= 100)]
                         df_uploaded = df_uploaded.sort_values("Volumen (%)").drop_duplicates("Volumen (%)", keep="last")
@@ -380,10 +360,9 @@ with tabs[0]: # Alimentación y Escenarios
                         else:
                             st.warning(f"CSV '{uploaded_file.name}' sin datos válidos (>= 2 puntos después de procesar).")
                     else:
-                        st.error(f"CSV '{uploaded_file.name}' no contiene las columnas esperadas ('Volumen (%)' y 'Temperatura (°C)') incluso después de intentar mapear nombres comunes. Columnas encontradas: {list(df_uploaded.columns)}")
+                        st.error(f"CSV '{uploaded_file.name}' no contiene las columnas esperadas. Columnas encontradas: {list(df_uploaded.columns)}")
                 elif not success_reading: 
-                    st.error(f"No se pudo leer o decodificar el archivo CSV '{uploaded_file.name}' con las codificaciones probadas. Verifique el formato, codificación y separador decimal del archivo.")
-
+                    st.error(f"No se pudo leer o decodificar el archivo CSV '{uploaded_file.name}'.")
 
             if not isinstance(comp_state.get("dist_curve"),pd.DataFrame):
                 comp_state["dist_curve"]=pd.DataFrame([{"Volumen (%)":v,"Temperatura (°C)":None} for v in [0,10,30,50,70,90,95,100]])
@@ -414,51 +393,104 @@ with tabs[0]: # Alimentación y Escenarios
                     (df_clean_dist_manual["Volumen (%)"] >= 0) & (df_clean_dist_manual["Volumen (%)"] <= 100)
                 ].sort_values("Volumen (%)").drop_duplicates("Volumen (%)", keep="last")
             comp_state["dist_curve"] = df_clean_dist_manual 
-
-            valid_dist_curve=True
-            final_dist_curve_for_calc = comp_state["dist_curve"] 
-            if not isinstance(final_dist_curve_for_calc, pd.DataFrame) or final_dist_curve_for_calc.empty:
-                st.warning(f"Comp. '{comp_state['name']}': la curva de destilación está vacía o no es válida.")
-                valid_dist_curve=False
-            elif len(final_dist_curve_for_calc)<2:
-                st.warning(f"Comp. '{comp_state['name']}': la curva de destilación necesita al menos 2 puntos válidos.");valid_dist_curve=False
             
-            if valid_dist_curve and not final_dist_curve_for_calc.empty: 
-                try:
-                    vol_values = pd.to_numeric(final_dist_curve_for_calc["Volumen (%)"], errors='raise').values
-                    temp_values = pd.to_numeric(final_dist_curve_for_calc["Temperatura (°C)"], errors='raise').values
-                except ValueError:
-                    st.error(f"Error crítico: las columnas de la curva de destilación para '{comp_state['name']}' no son numéricas incluso después del procesamiento.")
-                    valid_dist_curve = False 
-                    crude_data_valid_overall = False 
-                
-                if valid_dist_curve: 
-                    if 0.0 not in vol_values: 
-                        st.warning(f"Comp. '{comp_state['name']}': la curva debe incluir el punto IBP (0% vol).");valid_dist_curve=False
+            temp_valid_dist_curve_ui = True
+            temp_final_dist_curve_ui = comp_state["dist_curve"]
+            if not isinstance(temp_final_dist_curve_ui, pd.DataFrame) or temp_final_dist_curve_ui.empty:
+                st.caption("⚠️ Curva de destilación vacía o inválida.")
+                temp_valid_dist_curve_ui = False
+            elif len(temp_final_dist_curve_ui) < 2:
+                st.caption("⚠️ Curva de destilación necesita al menos 2 puntos.")
+                temp_valid_dist_curve_ui = False
+            elif 0.0 not in temp_final_dist_curve_ui["Volumen (%)"].values:
+                 st.caption("⚠️ Curva debe incluir IBP (0% vol).")
+                 temp_valid_dist_curve_ui = False
             
-            if valid_dist_curve:
-                dist_data_tuples_for_calc = list(zip(vol_values, temp_values))
-                dist_data_for_key_and_save = dist_data_tuples_for_calc 
-                component_crudes_for_processing.append({
-                    'name':comp_state['name'], 'api':comp_state['api'], 'sulfur':comp_state['sulfur'],
-                    'proportion_vol':comp_state['proportion_vol'],
-                    'distillation_curve_type': comp_state['distillation_curve_type'], 
-                    'distillation_data': dist_data_tuples_for_calc, 
-                    'distillation_data_for_key': dist_data_for_key_and_save, 
-                    'loaded_scenario_cuts':comp_state.get('loaded_scenario_cuts'),
-                    'loaded_scenario_type': comp_state.get('loaded_scenario_type')
-                })
-            else: crude_data_valid_overall=False
+            if not temp_valid_dist_curve_ui:
+                crude_data_valid_overall = False
+    
+    st.markdown("---") 
 
-    proportions_ok = validate_crude_proportions() 
+    if st.session_state.crude_components:
+        st.subheader("📊 Ajustar Proporciones de Mezcla")
+        proportion_data_editor = []
+        for comp in st.session_state.crude_components:
+            proportion_data_editor.append({
+                "id": comp["id"],
+                "Componente": comp["name"],
+                "Proporción (%vol)": float(comp.get("proportion_vol", 0.0))
+            })
+        
+        proportions_df_editor = pd.DataFrame(proportion_data_editor)
+        
+        edited_proportions_df = st.data_editor(
+            proportions_df_editor,
+            column_config={
+                "id": None, 
+                "Componente": st.column_config.TextColumn(disabled=True),
+                "Proporción (%vol)": st.column_config.NumberColumn(
+                    min_value=0.0, max_value=100.0, step=0.1, format="%.1f", required=True
+                )
+            },
+            hide_index=True,
+            key="proportions_editor_v2", 
+            use_container_width=True
+        )
+
+        if edited_proportions_df is not None: 
+            for index, row in edited_proportions_df.iterrows():
+                comp_id_to_update = row["id"]
+                new_proportion = row["Proporción (%vol)"]
+                for comp_state_item in st.session_state.crude_components:
+                    if comp_state_item["id"] == comp_id_to_update:
+                        comp_state_item["proportion_vol"] = new_proportion
+                        break
+        
+        proportions_ok = validate_crude_proportions() 
+        current_total_proportion_display = sum(float(c.get('proportion_vol', 0.0)) for c in st.session_state.crude_components)
+        sum_color_display = "green" if np.isclose(current_total_proportion_display, 100.0) else "red"
+        st.markdown(f"**Suma de Proporciones (Tabla):** <span style='color:{sum_color_display}; font-weight:bold;'>{current_total_proportion_display:.2f}%</span>", unsafe_allow_html=True)
+
+    else:
+        st.info("Añada componentes para definir sus proporciones de mezcla.")
+        proportions_ok = True 
 
     if crude_data_valid_overall and proportions_ok:
-        if st.button("🚀 Procesar Alimentación y Calcular Cortes", type="primary", use_container_width=True, key="process_button_main_v4"):
+        if st.button("🚀 Procesar Alimentación y Calcular Cortes", type="primary", use_container_width=True, key="process_button_main_v6"): 
+            component_crudes_for_processing = []
+            final_validation_ok = True
+            for comp_state_final in st.session_state.crude_components:
+                dist_curve_df = comp_state_final["dist_curve"]
+                if not (isinstance(dist_curve_df, pd.DataFrame) and not dist_curve_df.empty and len(dist_curve_df) >= 2 and 0.0 in dist_curve_df["Volumen (%)"].values):
+                    st.error(f"Datos de curva inválidos para '{comp_state_final['name']}' al intentar calcular. Verifique la tabla de curva.")
+                    final_validation_ok = False
+                    break
+                try:
+                    vols = pd.to_numeric(dist_curve_df["Volumen (%)"], errors='raise').values
+                    temps = pd.to_numeric(dist_curve_df["Temperatura (°C)"], errors='raise').values
+                    component_crudes_for_processing.append({
+                        'name': comp_state_final['name'],
+                        'api': comp_state_final['api'],
+                        'sulfur': comp_state_final['sulfur'],
+                        'proportion_vol': comp_state_final.get('proportion_vol', 0.0),
+                        'distillation_curve_type': comp_state_final['distillation_curve_type'],
+                        'distillation_data': list(zip(vols, temps)),
+                        'distillation_data_for_key': list(zip(vols, temps)),
+                        'loaded_scenario_cuts': comp_state_final.get('loaded_scenario_cuts'),
+                        'loaded_scenario_type': comp_state_final.get('loaded_scenario_type')
+                    })
+                except ValueError:
+                    st.error(f"Error convirtiendo datos de curva a numérico para '{comp_state_final['name']}'.")
+                    final_validation_ok = False; break
+            
+            if not final_validation_ok: st.stop()
+
             try:
                 if not component_crudes_for_processing: st.error("No hay componentes válidos para procesar."); st.stop()
+                
                 st.session_state.last_calculation_components_original_feed = [
                     {'name':c['name'], 'api':c['api'], 'sulfur': c['sulfur'],
-                     'proportion_vol':c['proportion_vol'],
+                     'proportion_vol':c['proportion_vol'], 
                      'distillation_curve_type': c['distillation_curve_type'], 
                      'distillation_data':c['distillation_data_for_key']} 
                     for c in component_crudes_for_processing
@@ -495,9 +527,7 @@ with tabs[0]: # Alimentación y Escenarios
                         if isinstance(cuts_to_apply, list) and all(isinstance(item, dict) for item in cuts_to_apply):
                             empirical_data_for_atm_tower = {"distribution_data": {"cuts": cuts_to_apply }}
                             st.info(f"Utilizando distribución de productos empírica para '{single_comp_proc_data['name']}' en torre atmosférica (desde escenario '{single_comp_proc_data.get('loaded_scenario_type')}').")
-                        else:
-                            st.warning(f"Los datos de cortes cargados para '{single_comp_proc_data['name']}' no tienen el formato esperado. Se calcularán teóricamente.")
-
+                
                 atm_defs = st.session_state.atmospheric_cuts_definitions_df
                 if not validate_cut_definitions_general(atm_defs, "Cortes Atmosféricos"): st.stop()
                 atm_cut_list = []
@@ -555,7 +585,10 @@ with tabs[0]: # Alimentación y Escenarios
 
                 st.session_state.all_final_products_df_editable = pd.DataFrame(final_products_data_for_df)
                 st.session_state.api_sensitivity_factor_display = api_sens_factor
-                st.success("✅ ¡Cálculos de refinería completados!")
+                
+                st.success("✅ ¡Cálculos completados!") # Volver a st.success
+                time.sleep(2) # Añadir la pausa de 2 segundos
+                
                 st.session_state.active_tab = "Resultados de Simulación" 
                 st.rerun() 
             except ValueError as ve: st.error(f"Error Validación en cálculo: {ve}")
@@ -564,6 +597,7 @@ with tabs[0]: # Alimentación y Escenarios
     else: st.warning("Corrija errores en datos de componentes antes de calcular.")
 
 
+# ... (Pestañas [1], [2], y [3] se mantienen como en la versión anterior con gráficos corregidos) ...
 with tabs[1]: # Definición de Cortes
     st.header("📋 Definición de Cortes de Destilación")
     st.subheader("Cortes Atmosféricos")
@@ -712,10 +746,9 @@ with tabs[3]: # Resultados
                             original_obj.yield_vol_percent = float(row_data_edited.get("Rend. Vol (%)", original_obj.yield_vol_percent if original_obj.yield_vol_percent is not None else 0.0))
                             
                             new_sulfur_wt = float(row_data_edited.get("Azufre (%peso)", original_obj.sulfur_cut_wt_percent if original_obj.sulfur_cut_wt_percent is not None else 0.0))
-                            if hasattr(original_obj, '_calculate_properties'): # Asumiendo que set_sulfur_properties no existe, recalculamos
-                                original_obj.sulfur_cut_wt_percent = new_sulfur_wt # Setear directamente
+                            if hasattr(original_obj, '_calculate_properties'): 
+                                original_obj.sulfur_cut_wt_percent = new_sulfur_wt 
                                 original_obj.sulfur_cut_ppm = new_sulfur_wt * 10000
-                                # Recalcular otras propiedades dependientes si es necesario, o ajustar _calculate_properties
                             
                             feed_sg_for_wt_calc = original_feed_processed.sg 
                             if row_data_edited.get("Origen del Producto") == "Vacío" and vac_feed_obj_for_calc:
@@ -784,7 +817,7 @@ with tabs[3]: # Resultados
                                    title="Rend. Vol. Atmosférico (s/Crudo Orig.)", 
                                    text_auto='.2f', 
                                    labels={"Corte": "Producto Atmosférico", y_col_atm_yield: "Rendimiento Vol. (%)"}) 
-                fig_atm_y.update_traces(textposition='outside', textfont_color='white') # Texto blanco y fuera
+                fig_atm_y.update_traces(textposition='outside', textfont_color='white') 
                 fig_atm_y.update_layout(height=GRAPH_HEIGHT, margin=dict(t=60, b=40, l=40, r=20), 
                                         yaxis_title="Rendimiento Vol. (%) s/Crudo", 
                                         yaxis_range=[0, max_y_val * Y_AXIS_PADDING_FACTOR])
@@ -801,7 +834,7 @@ with tabs[3]: # Resultados
                                    title="Azufre en Prod. Atmosféricos (ppm)", 
                                    text_auto='.0f',
                                    labels={"Corte": "Producto Atmosférico", y_col_atm_sulfur: "Azufre (ppm)"})
-                fig_atm_s.update_traces(textposition='outside', textfont_color='white') # Texto blanco y fuera
+                fig_atm_s.update_traces(textposition='outside', textfont_color='white') 
                 fig_atm_s.update_layout(height=GRAPH_HEIGHT, margin=dict(t=60, b=40, l=40, r=20), 
                                         yaxis_title="Azufre (ppm)",
                                         yaxis_range=[0, max_y_val_s * Y_AXIS_PADDING_FACTOR])
@@ -819,7 +852,7 @@ with tabs[3]: # Resultados
                                    title="Rend. Vol. Vacío (s/Alim. Vacío)", 
                                    text_auto='.2f',
                                    labels={"Corte": "Producto de Vacío", y_col_vac_yield: "Rendimiento Vol. (%)"})
-                fig_vac_y.update_traces(textposition='outside', textfont_color='white') # Texto blanco y fuera
+                fig_vac_y.update_traces(textposition='outside', textfont_color='white') 
                 fig_vac_y.update_layout(height=GRAPH_HEIGHT, margin=dict(t=60, b=40, l=40, r=20), 
                                         yaxis_title="Rendimiento Vol. (%) s/Alim. Vacío",
                                         yaxis_range=[0, max_y_val_vac * Y_AXIS_PADDING_FACTOR])
@@ -836,7 +869,7 @@ with tabs[3]: # Resultados
                                    title="Azufre en Prod. Vacío (ppm)", 
                                    text_auto='.0f',
                                    labels={"Corte": "Producto de Vacío", y_col_vac_sulfur: "Azufre (ppm)"})
-                fig_vac_s.update_traces(textposition='outside', textfont_color='white') # Texto blanco y fuera
+                fig_vac_s.update_traces(textposition='outside', textfont_color='white') 
                 fig_vac_s.update_layout(height=GRAPH_HEIGHT, margin=dict(t=60, b=40, l=40, r=20), 
                                         yaxis_title="Azufre (ppm)",
                                         yaxis_range=[0, max_y_val_vac_s * Y_AXIS_PADDING_FACTOR])
