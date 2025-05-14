@@ -13,7 +13,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from empirical_data import EmpiricalDistributionManager
 import logging
 import io # Necesario para leer el archivo cargado
-import time # <--- AÑADIDO PARA LA PAUSA
+import time 
 
 # --- Importaciones de Módulos Locales ---
 try:
@@ -28,7 +28,7 @@ except ImportError as e:
     st.stop()
 
 # --- Inicialización de Estado ---
-initialize_session_state() # Llama a la función de ui_logic.py
+initialize_session_state() 
 
 for comp in st.session_state.crude_components:
     comp_id = comp['id']
@@ -43,7 +43,6 @@ for comp in st.session_state.crude_components:
 # --- Funciones de UI y Manejo de Escenarios ---
 
 def generate_scenario_key(feed_name: str, feed_api: float, is_blend: bool, components_data: Optional[List[Dict[str, Any]]]=None) -> str:
-    """Genera una clave para un escenario basado en la alimentación original."""
     if is_blend and components_data:
         sorted_components = sorted(components_data, key=lambda x: x.get('name', ''))
         key_string = "blend;" + ";".join([
@@ -57,7 +56,6 @@ def generate_scenario_key(feed_name: str, feed_api: float, is_blend: bool, compo
 
 
 def save_scenario_data(primary_key: str, scenario_type: str, scenario_name: str, data_to_save: Dict[str, Any], manager: EmpiricalDistributionManager):
-    """Función auxiliar para guardar datos de escenario."""
     try:
         manager.save_scenario(
             primary_key=primary_key, scenario_type=scenario_type,
@@ -475,7 +473,7 @@ with tabs[0]: # Alimentación y Escenarios
                         'proportion_vol': comp_state_final.get('proportion_vol', 0.0),
                         'distillation_curve_type': comp_state_final['distillation_curve_type'],
                         'distillation_data': list(zip(vols, temps)),
-                        'distillation_data_for_key': list(zip(vols, temps)),
+                        'distillation_data_for_key': list(zip(vols, temps)), # Store original for key generation
                         'loaded_scenario_cuts': comp_state_final.get('loaded_scenario_cuts'),
                         'loaded_scenario_type': comp_state_final.get('loaded_scenario_type')
                     })
@@ -492,7 +490,7 @@ with tabs[0]: # Alimentación y Escenarios
                     {'name':c['name'], 'api':c['api'], 'sulfur': c['sulfur'],
                      'proportion_vol':c['proportion_vol'], 
                      'distillation_curve_type': c['distillation_curve_type'], 
-                     'distillation_data':c['distillation_data_for_key']} 
+                     'distillation_data':c['distillation_data_for_key']} # Use data_for_key here
                     for c in component_crudes_for_processing
                 ]
                 current_feed_components_for_calc = [
@@ -542,54 +540,95 @@ with tabs[0]: # Alimentación y Escenarios
                     empirical_data_for_crude=empirical_data_for_atm_tower
                 )
                 st.session_state.vacuum_feed_object = None
-                st.session_state.calculated_vacuum_products = []
-                st.session_state.all_final_products_df_editable = pd.DataFrame()
-                st.session_state.all_final_cuts_objects_for_editing = []
+                st.session_state.calculated_vacuum_products = [] 
+                
+                atm_residue_start_temp_for_vac_cuts: Optional[float] = None
+                
+                if st.session_state.calculated_atmospheric_residue and \
+                   st.session_state.calculated_atmospheric_residue.yield_vol_percent is not None and \
+                   st.session_state.calculated_atmospheric_residue.yield_vol_percent > 1e-3:
+                    
+                    if st.session_state.calculated_atmospheric_residue.t_initial_C is not None:
+                         atm_residue_start_temp_for_vac_cuts = st.session_state.calculated_atmospheric_residue.t_initial_C
+                         logging.info(f"Stored T_initial from Atmospheric Residue for vacuum cuts: {atm_residue_start_temp_for_vac_cuts:.1f}°C")
 
-                if st.session_state.calculated_atmospheric_residue and st.session_state.calculated_atmospheric_residue.yield_vol_percent is not None and st.session_state.calculated_atmospheric_residue.yield_vol_percent > 1e-3:
-                    st.session_state.vacuum_feed_object = create_vacuum_feed_from_residue(st.session_state.crude_to_process, st.session_state.calculated_atmospheric_residue, verbose=True)
-                    if st.session_state.vacuum_feed_object:
+                    st.session_state.vacuum_feed_object = create_vacuum_feed_from_residue(
+                        st.session_state.crude_to_process, 
+                        st.session_state.calculated_atmospheric_residue, 
+                        verbose=True
+                    )
+                    
+                    if st.session_state.vacuum_feed_object and atm_residue_start_temp_for_vac_cuts is not None:
                         vac_defs = st.session_state.vacuum_cuts_definitions_df
                         if not vac_defs.empty: 
                             if not validate_cut_definitions_general(vac_defs, "Cortes de Vacío"): st.stop()
                             vac_cut_list = list(zip(vac_defs["Nombre del Corte"], pd.to_numeric(vac_defs["Temperatura Final (°C)"], errors='coerce')))
-                            st.session_state.calculated_vacuum_products = calculate_vacuum_cuts(st.session_state.vacuum_feed_object, vac_cut_list, True, api_sens_factor)
-
+                            
+                            st.session_state.calculated_vacuum_products = calculate_vacuum_cuts(
+                                vacuum_feed=st.session_state.vacuum_feed_object, 
+                                vacuum_cut_definitions=vac_cut_list, 
+                                atmospheric_residue_initial_temp=atm_residue_start_temp_for_vac_cuts,
+                                verbose=True, 
+                                api_sensitivity_factor=api_sens_factor
+                            )
+                    elif st.session_state.vacuum_feed_object and atm_residue_start_temp_for_vac_cuts is None:
+                        st.warning("No se pudo determinar la temperatura inicial del residuo atmosférico para los cortes de vacío. Los cortes de vacío pueden no ser precisos.")
+                        logging.warning("atm_residue_start_temp_for_vac_cuts is None when it should have a value for vacuum calculation.")
+                
                 temp_all_final_cuts_objects = []
                 if st.session_state.calculated_atmospheric_distillates:
-                    temp_all_final_cuts_objects.extend(st.session_state.calculated_atmospheric_distillates)
-                if st.session_state.calculated_atmospheric_residue and \
-                   st.session_state.calculated_atmospheric_residue.yield_vol_percent is not None and \
-                   st.session_state.calculated_atmospheric_residue.yield_vol_percent > 1e-6: 
-                    if not st.session_state.calculated_vacuum_products:
-                        temp_all_final_cuts_objects.append(st.session_state.calculated_atmospheric_residue)
-                
-                if st.session_state.calculated_vacuum_products: 
-                    temp_all_final_cuts_objects.extend(st.session_state.calculated_vacuum_products)
-                
-                st.session_state.all_final_cuts_objects_for_editing = [c for c in temp_all_final_cuts_objects if c and hasattr(c, 'yield_vol_percent') and c.yield_vol_percent is not None and c.yield_vol_percent > 1e-6]
+                    temp_all_final_cuts_objects.extend(
+                        [dist for dist in st.session_state.calculated_atmospheric_distillates if dist and hasattr(dist, 'yield_vol_percent') and dist.yield_vol_percent is not None and dist.yield_vol_percent > 1e-6]
+                    )
 
+                meaningful_vacuum_products = []
+                if st.session_state.calculated_vacuum_products: 
+                    meaningful_vacuum_products = [
+                        vp for vp in st.session_state.calculated_vacuum_products
+                        if vp and hasattr(vp, 'yield_vol_percent') and vp.yield_vol_percent is not None and vp.yield_vol_percent > 1e-6
+                    ]
+
+                if meaningful_vacuum_products: 
+                    temp_all_final_cuts_objects.extend(meaningful_vacuum_products)
+                elif st.session_state.calculated_atmospheric_residue and \
+                     hasattr(st.session_state.calculated_atmospheric_residue, 'yield_vol_percent') and \
+                     st.session_state.calculated_atmospheric_residue.yield_vol_percent is not None and \
+                     st.session_state.calculated_atmospheric_residue.yield_vol_percent > 1e-6 and \
+                     not st.session_state.vacuum_feed_object: # Only add residue if no vacuum feed was made / no vac products
+                    temp_all_final_cuts_objects.append(st.session_state.calculated_atmospheric_residue)
+                
+                st.session_state.all_final_cuts_objects_for_editing = temp_all_final_cuts_objects
+                
                 final_products_data_for_df = []
                 atm_res_yield_on_crude_frac = (st.session_state.calculated_atmospheric_residue.yield_vol_percent / 100.0) if st.session_state.calculated_atmospheric_residue and st.session_state.calculated_atmospheric_residue.yield_vol_percent is not None else 0.0
                 for cut_obj in st.session_state.all_final_cuts_objects_for_editing:
+                    if cut_obj is None: continue 
                     prod_dict = cut_obj.to_dict()
-                    is_vac_product = st.session_state.vacuum_feed_object and any(vp.name == cut_obj.name for vp in st.session_state.calculated_vacuum_products if vp) 
+                    is_vac_product = any(vp.name == cut_obj.name for vp in meaningful_vacuum_products if vp)
                     prod_dict["Origen del Producto"] = "Vacío" if is_vac_product else "Atmosférico"
                     
                     if prod_dict["Origen del Producto"] == "Vacío" and cut_obj.yield_vol_percent is not None:
                         prod_dict["Rend. Vol (%) en Crudo Orig."] = (cut_obj.yield_vol_percent / 100.0) * atm_res_yield_on_crude_frac * 100.0
                     else: 
                         prod_dict["Rend. Vol (%) en Crudo Orig."] = cut_obj.yield_vol_percent
-                    
                     final_products_data_for_df.append(prod_dict)
 
                 st.session_state.all_final_products_df_editable = pd.DataFrame(final_products_data_for_df)
                 st.session_state.api_sensitivity_factor_display = api_sens_factor
                 
-                st.success("✅ ¡Cálculos completados!") # Volver a st.success
-                time.sleep(2) # Añadir la pausa de 2 segundos
+                st.success("✅ ¡Cálculos completados!") 
+                time.sleep(1) # Reduced sleep time
                 
-                st.session_state.active_tab = "Resultados de Simulación" 
+                # Switch to the results tab by setting its index (0, 1, 2, 3)
+                # This part might need a more robust way if Streamlit changes how tabs are managed internally
+                # For now, we assume 'Resultados de Simulación' is the 4th tab (index 3)
+                # A more direct way to set active tab is not available in st.tabs as of my last knowledge update.
+                # We will rely on rerun and Streamlit's state to hopefully show the correct tab.
+                # Consider using st.experimental_set_query_params to force a state that opens the tab,
+                # or a session_state variable that the tab itself checks to expand.
+                # For simplicity, we just rerun and hope the user navigates or we set a flag.
+                st.session_state.active_tab_results_flag = True # Custom flag
+
                 st.rerun() 
             except ValueError as ve: st.error(f"Error Validación en cálculo: {ve}")
             except Exception as e: st.error(f"❌ Error durante cálculo: {e}"); logging.exception("Error during calculation:"); st.stop()
@@ -597,8 +636,7 @@ with tabs[0]: # Alimentación y Escenarios
     else: st.warning("Corrija errores en datos de componentes antes de calcular.")
 
 
-# ... (Pestañas [1], [2], y [3] se mantienen como en la versión anterior con gráficos corregidos) ...
-with tabs[1]: # Definición de Cortes
+with tabs[1]: 
     st.header("📋 Definición de Cortes de Destilación")
     st.subheader("Cortes Atmosféricos")
     st.markdown("Defina productos de torre atmosférica y Temp. Fin (°C). Deben ser únicos y con temperaturas crecientes.")
@@ -618,7 +656,7 @@ with tabs[1]: # Definición de Cortes
     validate_cut_definitions_general(edited_vac_cuts_df, "Cortes de Vacío")
 
 
-with tabs[2]: # Parámetros
+with tabs[2]: 
     st.header("⚙️ Parámetros de Cálculo"); st.subheader("Factor de Sensibilidad API")
     cp1,cp2=st.columns([2,1]); cp1.markdown("Ajusta API de cortes. Default: 7.0.");
     st.session_state.api_sensitivity_factor = cp2.number_input(
@@ -638,11 +676,16 @@ with tabs[2]: # Parámetros
                 temp_component_objects_for_plot = []
                 for comp_data_orig in st.session_state.last_calculation_components_original_feed:
                     try:
+                        # Ensure distillation_data is a list of tuples/lists for CrudeOil constructor
+                        dist_data_for_plot = comp_data_orig.get('distillation_data',[])
+                        if isinstance(dist_data_for_plot, pd.DataFrame): # Convert if it's a DataFrame by mistake
+                            dist_data_for_plot = list(zip(dist_data_for_plot["Volumen (%)"], dist_data_for_plot["Temperatura (°C)"]))
+
                         comp_obj_plot = CrudeOil(
                             name=str(comp_data_orig.get('name','?')),
                             api_gravity=float(comp_data_orig.get('api',0.0)),
                             sulfur_content_wt_percent=float(comp_data_orig.get('sulfur',0.0)),
-                            distillation_data_percent_vol_temp_C=comp_data_orig.get('distillation_data',[]), 
+                            distillation_data_percent_vol_temp_C=dist_data_for_plot, 
                             distillation_curve_type=str(comp_data_orig.get('distillation_curve_type',"TBP")), 
                             verbose=False 
                         )
@@ -665,8 +708,19 @@ with tabs[2]: # Parámetros
         except Exception as e:st.error(f"Error graficando TBP: {e}")
     else:st.info("Calcule en 'Alimentación y Escenarios' para ver TBP.")
 
-with tabs[3]: # Resultados
+with tabs[3]: 
     st.header("📊 Resultados de Simulación")
+    
+    # Check the custom flag to see if this tab should be active
+    # This is a workaround as st.tabs doesn't have a direct way to set the active tab programmatically
+    # This part is more of a conceptual attempt; Streamlit's execution model might make this tricky.
+    # A more reliable method would involve query parameters or a more complex state management.
+    if st.session_state.get('active_tab_results_flag', False):
+        # Potentially do something here if needed when switching, or just let the content render
+        # Reset the flag so it doesn't interfere with manual tab clicks later
+        st.session_state.active_tab_results_flag = False 
+
+
     original_feed_processed = st.session_state.get('crude_to_process') 
     all_final_product_objects_for_display = st.session_state.get('all_final_cuts_objects_for_editing', [])
     api_factor_val = st.session_state.get('api_sensitivity_factor_display') 
@@ -695,10 +749,12 @@ with tabs[3]: # Resultados
             atm_res_for_calc = st.session_state.get('calculated_atmospheric_residue')
             atm_res_yield_on_crude_frac_init = (atm_res_for_calc.yield_vol_percent / 100.0) if atm_res_for_calc and atm_res_for_calc.yield_vol_percent is not None else 0.0
             vac_feed_for_check = st.session_state.get('vacuum_feed_object')
+            meaningful_vac_prods_init = [vp for vp in st.session_state.get('calculated_vacuum_products', []) if vp and vp.yield_vol_percent is not None and vp.yield_vol_percent > 1e-6]
+
             for cut_obj_init in all_final_product_objects_for_display:
                 if cut_obj_init is None: continue 
                 prod_dict_init = cut_obj_init.to_dict()
-                is_vac_product_init = vac_feed_for_check and any(vp.name == cut_obj_init.name for vp in st.session_state.get('calculated_vacuum_products', []) if vp)
+                is_vac_product_init = any(vp.name == cut_obj_init.name for vp in meaningful_vac_prods_init if vp)
                 prod_dict_init["Origen del Producto"] = "Vacío" if is_vac_product_init else "Atmosférico"
                 if prod_dict_init["Origen del Producto"] == "Vacío" and cut_obj_init.yield_vol_percent is not None:
                     prod_dict_init["Rend. Vol (%) en Crudo Orig."] = (cut_obj_init.yield_vol_percent / 100.0) * atm_res_yield_on_crude_frac_init * 100.0
@@ -739,6 +795,8 @@ with tabs[3]: # Resultados
                     atm_res_obj_for_calc = st.session_state.get('calculated_atmospheric_residue')
                     vac_feed_obj_for_calc = st.session_state.get('vacuum_feed_object')
                     original_objects_list = st.session_state.get('all_final_cuts_objects_for_editing', [])
+                    meaningful_vac_prods_for_edit_apply = [vp for vp in st.session_state.get('calculated_vacuum_products', []) if vp and vp.yield_vol_percent is not None and vp.yield_vol_percent > 1e-6]
+
                     
                     for index, row_data_edited in edited_df_unified_local.iterrows():
                         original_obj = next((cut for cut in original_objects_list if cut and cut.name == row_data_edited["Corte"]), None) 
@@ -751,10 +809,11 @@ with tabs[3]: # Resultados
                                 original_obj.sulfur_cut_ppm = new_sulfur_wt * 10000
                             
                             feed_sg_for_wt_calc = original_feed_processed.sg 
-                            if row_data_edited.get("Origen del Producto") == "Vacío" and vac_feed_obj_for_calc:
+                            is_vac_prod_for_wt_calc = any(vp.name == original_obj.name for vp in meaningful_vac_prods_for_edit_apply if vp)
+                            if is_vac_prod_for_wt_calc and vac_feed_obj_for_calc and vac_feed_obj_for_calc.sg is not None:
                                 feed_sg_for_wt_calc = vac_feed_obj_for_calc.sg 
                             
-                            if original_obj.sg_cut and feed_sg_for_wt_calc and original_obj.yield_vol_percent is not None:
+                            if original_obj.sg_cut and feed_sg_for_wt_calc and original_obj.yield_vol_percent is not None and feed_sg_for_wt_calc > 1e-6:
                                  density_corr_factor = 0.85 if original_obj.is_gas_cut else 1.0
                                  original_obj.yield_wt_percent = original_obj.yield_vol_percent * (original_obj.sg_cut / feed_sg_for_wt_calc) * density_corr_factor
                             else: original_obj.yield_wt_percent = 0.0 
@@ -768,7 +827,7 @@ with tabs[3]: # Resultados
                     for cut_obj_recalc in updated_final_cuts_list:
                         if cut_obj_recalc is None: continue
                         prod_dict_recalc = cut_obj_recalc.to_dict()
-                        is_vac_recalc = vac_feed_obj_for_calc and any(vp.name == cut_obj_recalc.name for vp in st.session_state.get('calculated_vacuum_products',[]) if vp)
+                        is_vac_recalc = any(vp.name == cut_obj_recalc.name for vp in meaningful_vac_prods_for_edit_apply if vp)
                         prod_dict_recalc["Origen del Producto"] = "Vacío" if is_vac_recalc else "Atmosférico"
                         if prod_dict_recalc["Origen del Producto"] == "Vacío" and cut_obj_recalc.yield_vol_percent is not None:
                             prod_dict_recalc["Rend. Vol (%) en Crudo Orig."] = (cut_obj_recalc.yield_vol_percent / 100.0) * atm_res_yield_on_crude_frac_recalc * 100.0
@@ -793,6 +852,28 @@ with tabs[3]: # Resultados
                                mime='text/csv', use_container_width=True, key="download_final_products_button_v2")
 
         st.markdown("---"); st.subheader("Visualización de Rendimientos y Azufre")
+        
+        if st.checkbox("Mostrar datos de depuración de cálculos y gráficos", key="debug_all_data_cb_v3"):
+            st.write("--- Datos de Depuración ---")
+            st.write("Objeto Residuo Atmosférico Calculado (st.session_state.calculated_atmospheric_residue):")
+            st.json(st.session_state.get('calculated_atmospheric_residue').to_dict() if st.session_state.get('calculated_atmospheric_residue') and hasattr(st.session_state.get('calculated_atmospheric_residue'), 'to_dict') else str(st.session_state.get('calculated_atmospheric_residue')))
+            st.write("Objeto Alimentación a Vacío (st.session_state.vacuum_feed_object):")
+            vac_feed_obj_debug = st.session_state.get('vacuum_feed_object')
+            if vac_feed_obj_debug:
+                st.json({
+                    "name": vac_feed_obj_debug.name, "api": vac_feed_obj_debug.api_gravity, "sulfur": vac_feed_obj_debug.sulfur_total_wt_percent,
+                    "ibpC": vac_feed_obj_debug.ibp_C, "fbpC": vac_feed_obj_debug.fbp_C,
+                    "curve_points (first 5)": list(zip(vac_feed_obj_debug.distillation_volumes_percent, vac_feed_obj_debug.distillation_temperatures_C))[:5] if vac_feed_obj_debug.distillation_volumes_percent else "N/A"
+                })
+            else: st.write("No calculado o None.")
+            st.write("Productos de Vacío Calculados (st.session_state.calculated_vacuum_products - antes de filtrar):")
+            st.json([vp.to_dict() if vp and hasattr(vp, 'to_dict') else str(vp) for vp in st.session_state.get('calculated_vacuum_products', [])])
+            st.write("Lista de Objetos de Cortes Finales para Editar/Mostrar (st.session_state.all_final_cuts_objects_for_editing):")
+            st.json([c.to_dict() if c and hasattr(c, 'to_dict') else str(c) for c in st.session_state.get('all_final_cuts_objects_for_editing', [])])
+            st.write("DataFrame Unificado para Gráficos (df_plot_unified - base para gráficos):")
+            st.dataframe(st.session_state.all_final_products_df_editable) 
+            st.write("--- Fin Datos de Depuración ---")
+
         df_plot_unified = st.session_state.all_final_products_df_editable.copy()
         GRAPH_HEIGHT = 450; Y_AXIS_PADDING_FACTOR = 1.45 
         
@@ -811,7 +892,7 @@ with tabs[3]: # Resultados
             if not atm_plot_df.empty:
                 y_col_atm_yield = "Rend. Vol (%) en Crudo Orig."
                 max_y_val = atm_plot_df[y_col_atm_yield].max() if not atm_plot_df[y_col_atm_yield].empty else 0
-                if max_y_val == 0: max_y_val = 1 
+                if pd.isna(max_y_val) or max_y_val == 0: max_y_val = 1 
                 
                 fig_atm_y = px.bar(atm_plot_df, x="Corte", y=y_col_atm_yield, 
                                    title="Rend. Vol. Atmosférico (s/Crudo Orig.)", 
@@ -828,7 +909,7 @@ with tabs[3]: # Resultados
             if not atm_plot_df.empty:
                 y_col_atm_sulfur = "Azufre (ppm)"
                 max_y_val_s = atm_plot_df[y_col_atm_sulfur].max() if not atm_plot_df[y_col_atm_sulfur].empty else 0
-                if max_y_val_s == 0: max_y_val_s = 10 
+                if pd.isna(max_y_val_s) or max_y_val_s == 0: max_y_val_s = 10 
                 
                 fig_atm_s = px.bar(atm_plot_df, x="Corte", y=y_col_atm_sulfur, 
                                    title="Azufre en Prod. Atmosféricos (ppm)", 
@@ -844,9 +925,9 @@ with tabs[3]: # Resultados
         col_vac1, col_vac2 = st.columns(2)
         with col_vac1:
             if not vac_plot_df.empty: 
-                y_col_vac_yield = "Rend. Vol (%)" 
+                y_col_vac_yield = "Rend. Vol (%)" # Rendimiento sobre alimentación a vacío
                 max_y_val_vac = vac_plot_df[y_col_vac_yield].max() if not vac_plot_df[y_col_vac_yield].empty else 0
-                if max_y_val_vac == 0: max_y_val_vac = 1
+                if pd.isna(max_y_val_vac) or max_y_val_vac == 0: max_y_val_vac = 1
                 
                 fig_vac_y = px.bar(vac_plot_df, x="Corte", y=y_col_vac_yield, 
                                    title="Rend. Vol. Vacío (s/Alim. Vacío)", 
@@ -863,7 +944,7 @@ with tabs[3]: # Resultados
             if not vac_plot_df.empty:
                 y_col_vac_sulfur = "Azufre (ppm)"
                 max_y_val_vac_s = vac_plot_df[y_col_vac_sulfur].max() if not vac_plot_df[y_col_vac_sulfur].empty else 0
-                if max_y_val_vac_s == 0: max_y_val_vac_s = 10
+                if pd.isna(max_y_val_vac_s) or max_y_val_vac_s == 0: max_y_val_vac_s = 10
                 
                 fig_vac_s = px.bar(vac_plot_df, x="Corte", y=y_col_vac_sulfur, 
                                    title="Azufre en Prod. Vacío (ppm)", 

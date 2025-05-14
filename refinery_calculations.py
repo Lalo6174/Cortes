@@ -490,12 +490,11 @@ class DistillationCut:
         self.sulfur_cut_ppm = (self.sulfur_cut_wt_percent * 10000) if self.sulfur_cut_wt_percent is not None else None
         
         if self.verbose:
-            # --- MODIFICACIÓN AQUÍ ---
             api_display = f"{self.api_cut:.1f}" if self.api_cut is not None else "N/A"
             sulfur_display = f"{self.sulfur_cut_wt_percent:.4f}" if self.sulfur_cut_wt_percent is not None else "N/A"
             yield_display = f"{self.yield_vol_percent:.2f}" if self.yield_vol_percent is not None else "N/A"
-            logging.info(f"Cut '{self.name}' calculated: YieldVol={yield_display}%, API={api_display}, S_wt%={sulfur_display}")
-            # --- FIN DE LA MODIFICACIÓN ---
+            logging.info(f"Cut '{self.name}' calculated: T_init={self.t_initial_C:.1f}°C, T_final={self.t_final_C:.1f}°C, YieldVol={yield_display}%, API={api_display}, S_wt%={sulfur_display}")
+
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -524,6 +523,9 @@ def calculate_atmospheric_cuts(
 
     distillate_cuts: List[DistillationCut] = []
     current_t_initial = crude_oil_feed.ibp_C if crude_oil_feed.ibp_C is not None else 0.0
+    if verbose:
+            logging.info(f"Initial T_initial for atmospheric cuts (from crude IBP): {current_t_initial:.1f}°C")
+
 
     sorted_cut_definitions = sorted(atmospheric_cut_definitions, key=lambda x: x[1])
 
@@ -532,6 +534,8 @@ def calculate_atmospheric_cuts(
             if verbose: logging.warning(f"Skipping atmospheric cut '{cut_name}' as its T_final ({t_final_C}°C) is not greater than current T_initial ({current_t_initial}°C).")
             continue
         
+        if verbose:
+            logging.info(f"Defining atmospheric cut '{cut_name}': T_initial={current_t_initial:.1f}°C, T_final={t_final_C:.1f}°C")
         cut = DistillationCut(name=cut_name, 
                               t_initial_C=current_t_initial, 
                               t_final_C=t_final_C, 
@@ -539,18 +543,23 @@ def calculate_atmospheric_cuts(
                               api_sensitivity_factor=api_sensitivity_factor,
                               verbose=verbose)
         distillate_cuts.append(cut)
-        current_t_initial = t_final_C 
+        current_t_initial = t_final_C # This is the FBP of the current cut, and IBP for the next
+        if verbose:
+            logging.info(f"  Next T_initial set to: {current_t_initial:.1f}°C (from FBP of '{cut_name}')")
+
 
     atmospheric_residue_obj: Optional[DistillationCut] = None
     if crude_oil_feed.fbp_C is not None and current_t_initial < crude_oil_feed.fbp_C:
+        if verbose:
+            logging.info(f"Defining Atmospheric Residue: T_initial={current_t_initial:.1f}°C, T_final={crude_oil_feed.fbp_C:.1f}°C")
         atmospheric_residue_obj = DistillationCut(name="Residuo Atmosférico",
-                                                  t_initial_C=current_t_initial,
+                                                  t_initial_C=current_t_initial, # Starts where the last distillate ended
                                                   t_final_C=crude_oil_feed.fbp_C, 
                                                   crude_oil_feed=crude_oil_feed,
                                                   api_sensitivity_factor=api_sensitivity_factor,
                                                   verbose=verbose)
-        if verbose and atmospheric_residue_obj and atmospheric_residue_obj.yield_vol_percent is not None: # Check for None
-             logging.info(f"Atmospheric Residue calculated: YieldVol={atmospheric_residue_obj.yield_vol_percent:.2f}%")
+        if verbose and atmospheric_residue_obj and atmospheric_residue_obj.yield_vol_percent is not None: 
+             logging.info(f"Atmospheric Residue calculated: YieldVol={atmospheric_residue_obj.yield_vol_percent:.2f}%, T_initial={atmospheric_residue_obj.t_initial_C:.1f}°C")
     elif verbose:
         logging.info(f"No significant atmospheric residue to calculate. Current T_initial: {current_t_initial}°C, Crude FBP: {crude_oil_feed.fbp_C}°C")
 
@@ -572,8 +581,10 @@ def create_vacuum_feed_from_residue(
         logging.info(f"Creating vacuum feed from atmospheric residue of '{original_crude_feed.name}'.")
         api_cut_display = f"{atmospheric_residue.api_cut:.1f}" if atmospheric_residue.api_cut is not None else "N/A"
         sulfur_cut_display = f"{atmospheric_residue.sulfur_cut_wt_percent:.4f}" if atmospheric_residue.sulfur_cut_wt_percent is not None else "N/A"
-        logging.info(f"Atmospheric Residue props: API={api_cut_display}, S%wt={sulfur_cut_display}")
+        logging.info(f"Atmospheric Residue props: T_initial={atmospheric_residue.t_initial_C:.1f}°C, API={api_cut_display}, S%wt={sulfur_cut_display}")
     
+    # The T_initial for the vacuum feed *is* the T_initial of the atmospheric residue object
+    # This temperature was the T_final of the last atmospheric distillate.
     vac_feed_t_initial = atmospheric_residue.t_initial_C
     vac_feed_t_final = original_crude_feed.fbp_C 
 
@@ -584,36 +595,94 @@ def create_vacuum_feed_from_residue(
     original_vols = np.array(original_crude_feed.distillation_volumes_percent)
     original_temps = np.array(original_crude_feed.distillation_temperatures_C)
 
+    # We need to ensure the vacuum feed distillation curve starts at 0% volume at vac_feed_t_initial
+    # and ends at 100% volume at vac_feed_t_final on its own scale.
+    
+    # Points from original curve that fall within the residue's temperature range
     mask = (original_temps >= vac_feed_t_initial) & (original_temps <= vac_feed_t_final)
     residue_temps_on_orig_curve = original_temps[mask]
     residue_vols_on_orig_curve = original_vols[mask]
 
-    if len(residue_vols_on_orig_curve) < 2:
-        if verbose: logging.warning(f"Not enough points from original crude curve to define vacuum feed curve. Points found: {len(residue_vols_on_orig_curve)}")
+    vac_feed_dist_curve_points = []
+
+    # Ensure the first point of the vacuum feed curve is (0.0, vac_feed_t_initial)
+    # We get the volume on the original crude curve corresponding to vac_feed_t_initial
+    vol_at_vac_feed_t_initial = original_crude_feed.get_volume_at_temp(vac_feed_t_initial)
+    vac_feed_dist_curve_points.append((vol_at_vac_feed_t_initial, vac_feed_t_initial))
+    
+    # Add points from the original curve that are strictly within the new IBP and FBP
+    for vol, temp in zip(residue_vols_on_orig_curve, residue_temps_on_orig_curve):
+        if temp > vac_feed_t_initial and temp < vac_feed_t_final: # Strictly between
+            vac_feed_dist_curve_points.append((vol, temp))
+
+    # Ensure the last point corresponds to vac_feed_t_final
+    # We get the volume on the original crude curve corresponding to vac_feed_t_final
+    vol_at_vac_feed_t_final = original_crude_feed.get_volume_at_temp(vac_feed_t_final)
+    # Add this point only if it's different from the last added point to avoid duplicate temperatures if FBP is same as a point in residue_temps
+    if not vac_feed_dist_curve_points or vac_feed_dist_curve_points[-1][1] < vac_feed_t_final:
+         vac_feed_dist_curve_points.append((vol_at_vac_feed_t_final, vac_feed_t_final))
+
+
+    # Remove duplicates by volume, then sort by volume before renormalization
+    # This step handles cases where original curve might not be dense enough
+    # or where prepended/appended points create duplicates.
+    if vac_feed_dist_curve_points:
+        temp_df_for_vac_feed = pd.DataFrame(vac_feed_dist_curve_points, columns=['vol_orig', 'temp'])
+        temp_df_for_vac_feed.sort_values(by=['vol_orig', 'temp'], inplace=True) 
+        temp_df_for_vac_feed.drop_duplicates(subset=['vol_orig'], keep='first', inplace=True) 
+        temp_df_for_vac_feed.drop_duplicates(subset=['temp'], keep='first', inplace=True) # Ensure unique temperatures for interpolation
+        
+        unique_residue_vols_on_orig_curve = temp_df_for_vac_feed['vol_orig'].values
+        unique_residue_temps_on_orig_curve = temp_df_for_vac_feed['temp'].values
+    else: # Fallback if no points were gathered
+        unique_residue_vols_on_orig_curve = np.array([vol_at_vac_feed_t_initial, vol_at_vac_feed_t_final])
+        unique_residue_temps_on_orig_curve = np.array([vac_feed_t_initial, vac_feed_t_final])
+
+
+    if len(unique_residue_vols_on_orig_curve) < 2:
+        if verbose: logging.warning(f"Not enough unique points from original crude curve to define vacuum feed curve after filtering. Points found: {len(unique_residue_vols_on_orig_curve)}. Using simple 2-point curve.")
         vac_feed_dist_curve = [(0.0, vac_feed_t_initial), (100.0, vac_feed_t_final)]
     else:
-        vol_start_of_residue_on_orig_crude = original_crude_feed.get_volume_at_temp(vac_feed_t_initial)
-        vol_end_of_residue_on_orig_crude = original_crude_feed.get_volume_at_temp(vac_feed_t_final) 
-
-        total_vol_span_of_residue_on_orig_crude = vol_end_of_residue_on_orig_crude - vol_start_of_residue_on_orig_crude
+        # Renormalize volumes for the vacuum feed's own curve (0% to 100%)
+        vol_start_of_residue_on_orig_crude_for_renorm = unique_residue_vols_on_orig_curve[0]
+        vol_end_of_residue_on_orig_crude_for_renorm = unique_residue_vols_on_orig_curve[-1]
+        
+        total_vol_span_of_residue_on_orig_crude = vol_end_of_residue_on_orig_crude_for_renorm - vol_start_of_residue_on_orig_crude_for_renorm
         
         if total_vol_span_of_residue_on_orig_crude < 1e-3: 
              if verbose: logging.warning("Residue volume span on original crude is too small for renormalization. Using simple 2-point curve for vacuum feed.")
              vac_feed_dist_curve = [(0.0, vac_feed_t_initial), (100.0, vac_feed_t_final)]
         else:
-            renormalized_vols = ((residue_vols_on_orig_curve - vol_start_of_residue_on_orig_crude) / total_vol_span_of_residue_on_orig_crude) * 100.0
-            vac_feed_dist_curve_points = []
-            if not np.isclose(renormalized_vols[0], 0.0):
-                vac_feed_dist_curve_points.append((0.0, residue_temps_on_orig_curve[0])) 
+            renormalized_vols = ((unique_residue_vols_on_orig_curve - vol_start_of_residue_on_orig_crude_for_renorm) / total_vol_span_of_residue_on_orig_crude) * 100.0
             
-            for vol, temp in zip(renormalized_vols, residue_temps_on_orig_curve):
-                vac_feed_dist_curve_points.append((vol, temp))
+            # Ensure the renormalized curve strictly starts at 0% and ends at 100%
+            renormalized_vols[0] = 0.0
+            renormalized_vols[-1] = 100.0
+            
+            # The temperatures correspond directly to the unique_residue_temps_on_orig_curve
+            final_temps_for_vac_feed_curve = unique_residue_temps_on_orig_curve.copy()
+            # Ensure first and last temperatures are exactly the vac_feed_t_initial and vac_feed_t_final
+            final_temps_for_vac_feed_curve[0] = vac_feed_t_initial
+            final_temps_for_vac_feed_curve[-1] = vac_feed_t_final
 
-            if not np.isclose(renormalized_vols[-1], 100.0):
-                 vac_feed_dist_curve_points.append((100.0, residue_temps_on_orig_curve[-1])) 
+
+            vac_feed_dist_curve = list(zip(renormalized_vols, final_temps_for_vac_feed_curve))
             
-            temp_df = pd.DataFrame(vac_feed_dist_curve_points, columns=['vol', 'temp']).drop_duplicates(subset=['vol'], keep='last')
+            # Final check for duplicates in renormalized curve points (by volume) and ensure monotonicity
+            temp_df = pd.DataFrame(vac_feed_dist_curve, columns=['vol', 'temp'])
+            temp_df.drop_duplicates(subset=['vol'], keep='first', inplace=True)
+            temp_df.sort_values(by='vol', inplace=True) # Ensure sorted by volume
+            # Check temperature monotonicity again after ensuring start/end temps
+            if not np.all(np.diff(temp_df['temp'].values) >= 0):
+                if verbose: logging.warning(f"Vacuum feed curve temperatures are not strictly monotonic after final adjustments for {original_crude_feed.name}. This might affect interpolation. Curve: {temp_df.to_dict('records')}")
+                # Attempt to fix by keeping first temp for duplicated volumes if temps are not monotonic
+                # This is a simple fix; more complex scenarios might need more robust handling
+                temp_df.drop_duplicates(subset=['temp'], keep='first', inplace=True)
+                temp_df.sort_values(by='vol', inplace=True)
+
+
             vac_feed_dist_curve = list(zip(temp_df['vol'], temp_df['temp']))
+
 
     vac_feed_api = atmospheric_residue.api_cut if atmospheric_residue.api_cut is not None else original_crude_feed.api_gravity 
     vac_feed_sulfur = atmospheric_residue.sulfur_cut_wt_percent if atmospheric_residue.sulfur_cut_wt_percent is not None else original_crude_feed.sulfur_total_wt_percent 
@@ -628,20 +697,33 @@ def create_vacuum_feed_from_residue(
     if verbose:
         logging.info(f"Vacuum feed created: {vacuum_feed_crude.name}, API: {vacuum_feed_crude.api_gravity:.1f}")
         logging.info(f"  Vacuum feed TBP curve (first 5 points): {vacuum_feed_crude.original_raw_distillation_data[:5]}")
+        logging.info(f"  Vacuum feed IBP_C: {vacuum_feed_crude.ibp_C:.1f}, FBP_C: {vacuum_feed_crude.fbp_C:.1f}")
     return vacuum_feed_crude
 
 def calculate_vacuum_cuts(
     vacuum_feed: CrudeOil, 
     vacuum_cut_definitions: List[Tuple[str, float]], 
+    atmospheric_residue_initial_temp: float, # MODIFICACIÓN: Pasar T_inicial del residuo explícitamente
     verbose: bool = False,
     api_sensitivity_factor: float = 7.0
 ) -> List[DistillationCut]:
     if verbose:
         logging.info(f"Calculating vacuum cuts for: {vacuum_feed.name}")
         logging.info(f"Vacuum cut definitions (TBP eq. atm.): {vacuum_cut_definitions}")
+        logging.info(f"Received Atmospheric Residue Initial Temp (for first vacuum cut IBP): {atmospheric_residue_initial_temp:.1f}°C")
 
     vacuum_distillates: List[DistillationCut] = []
-    current_t_initial_vac = vacuum_feed.ibp_C if vacuum_feed.ibp_C is not None else 0.0 
+    
+    # MODIFICACIÓN CLAVE: El IBP del primer corte de vacío es el T_final del último
+    # destilado atmosférico (que es el T_inicial del residuo atmosférico).
+    current_t_initial_vac = atmospheric_residue_initial_temp
+    
+    if verbose:
+        logging.info(f"Initial T_initial for vacuum cuts (from Atm. Residue IBP): {current_t_initial_vac:.1f}°C")
+        if vacuum_feed.ibp_C is not None and not np.isclose(vacuum_feed.ibp_C, current_t_initial_vac, atol=0.5): # atol para pequeñas diferencias de flotantes
+            logging.warning(f"  Mismatch: Vacuum Feed IBP ({vacuum_feed.ibp_C:.1f}°C) vs. "
+                            f"Atm Residue Initial Temp ({current_t_initial_vac:.1f}°C). Using Atm Residue Initial Temp.")
+
 
     sorted_vac_cut_definitions = sorted(vacuum_cut_definitions, key=lambda x: x[1])
 
@@ -649,6 +731,9 @@ def calculate_vacuum_cuts(
         if t_final_C_eq_atm <= current_t_initial_vac:
             if verbose: logging.warning(f"Skipping vacuum cut '{cut_name}' as T_final_eq_atm ({t_final_C_eq_atm}°C) is not > current T_initial_vac ({current_t_initial_vac}°C).")
             continue
+        
+        if verbose:
+            logging.info(f"Defining vacuum cut '{cut_name}': T_initial={current_t_initial_vac:.1f}°C, T_final={t_final_C_eq_atm:.1f}°C")
 
         vac_cut = DistillationCut(name=cut_name,
                                   t_initial_C=current_t_initial_vac,
@@ -657,9 +742,14 @@ def calculate_vacuum_cuts(
                                   api_sensitivity_factor=api_sensitivity_factor,
                                   verbose=verbose)
         vacuum_distillates.append(vac_cut)
-        current_t_initial_vac = t_final_C_eq_atm
+        current_t_initial_vac = t_final_C_eq_atm # FBP del corte actual es IBP del siguiente
+        if verbose:
+            logging.info(f"  Next T_initial for vacuum set to: {current_t_initial_vac:.1f}°C (from FBP of '{cut_name}')")
+
 
     if vacuum_feed.fbp_C is not None and current_t_initial_vac < vacuum_feed.fbp_C:
+        if verbose:
+            logging.info(f"Defining Vacuum Residue: T_initial={current_t_initial_vac:.1f}°C, T_final={vacuum_feed.fbp_C:.1f}°C")
         vacuum_residue_obj = DistillationCut(name="Residuo de Vacío",
                                              t_initial_C=current_t_initial_vac,
                                              t_final_C=vacuum_feed.fbp_C, 
@@ -667,7 +757,7 @@ def calculate_vacuum_cuts(
                                              api_sensitivity_factor=api_sensitivity_factor,
                                              verbose=verbose)
         vacuum_distillates.append(vacuum_residue_obj) 
-        if verbose and vacuum_residue_obj and vacuum_residue_obj.yield_vol_percent is not None: # Check for None
+        if verbose and vacuum_residue_obj and vacuum_residue_obj.yield_vol_percent is not None: 
             logging.info(f"Vacuum Residue calculated: YieldVol={vacuum_residue_obj.yield_vol_percent:.2f}%")
     elif verbose:
         logging.info(f"No significant vacuum residue to calculate. Current T_initial_vac: {current_t_initial_vac}°C, VacFeed FBP: {vacuum_feed.fbp_C}°C")
@@ -692,30 +782,40 @@ def calculate_vacuum_cuts(
 #         api_disp = f"{cut.api_cut:.1f}" if cut.api_cut is not None else "N/A"
 #         s_disp = f"{cut.sulfur_cut_wt_percent:.4f}" if cut.sulfur_cut_wt_percent is not None else "N/A"
 #         y_disp = f"{cut.yield_vol_percent:.2f}" if cut.yield_vol_percent is not None else "N/A"
-#         print(f"  {cut.name}: YieldVol={y_disp}%, API={api_disp}, S_wt%={s_disp}")
+#         print(f"  {cut.name}: T_init={cut.t_initial_C:.1f}, T_final={cut.t_final_C:.1f}, YieldVol={y_disp}%, API={api_disp}, S_wt%={s_disp}")
 #     if atm_residue:
 #         api_disp = f"{atm_residue.api_cut:.1f}" if atm_residue.api_cut is not None else "N/A"
 #         s_disp = f"{atm_residue.sulfur_cut_wt_percent:.4f}" if atm_residue.sulfur_cut_wt_percent is not None else "N/A"
 #         y_disp = f"{atm_residue.yield_vol_percent:.2f}" if atm_residue.yield_vol_percent is not None else "N/A"
-#         print(f"Atmospheric Residue: YieldVol={y_disp}%, API={api_disp}, S_wt%={s_disp}")
+#         print(f"Atmospheric Residue: T_init={atm_residue.t_initial_C:.1f}, T_final={atm_residue.t_final_C:.1f}, YieldVol={y_disp}%, API={api_disp}, S_wt%={s_disp}")
 #     else:
 #         print("No Atmospheric Residue produced.")
 
 #     if atm_residue and atm_residue.yield_vol_percent is not None and atm_residue.yield_vol_percent > 0.1 :
 #         print(f"\n--- Testing Vacuum Distillation ---")
+#         # Aseguramos que atm_residue.t_initial_C sea usado para el primer corte de vacío
+#         atm_residue_start_temp_for_vacuum = atm_residue.t_initial_C 
+        
 #         vacuum_feed = create_vacuum_feed_from_residue(test_crude, atm_residue, verbose=True)
 #         if vacuum_feed:
 #             ibp_disp = f"{vacuum_feed.ibp_C:.1f}" if vacuum_feed.ibp_C is not None else "N/A"
 #             fbp_disp = f"{vacuum_feed.fbp_C:.1f}" if vacuum_feed.fbp_C is not None else "N/A"
 #             print(f"Vacuum Feed created: {vacuum_feed.name}, API: {vacuum_feed.api_gravity:.1f}, IBP: {ibp_disp}, FBP: {fbp_disp}")
 #             vac_cuts_def = [("LVGO", 420.0), ("MVGO", 480.0), ("HVGO", 520.0)] 
-#             vacuum_products = calculate_vacuum_cuts(vacuum_feed, vac_cuts_def, verbose=True, api_sensitivity_factor=5.0)
+            
+#             vacuum_products = calculate_vacuum_cuts(
+#                 vacuum_feed, 
+#                 vac_cuts_def, 
+#                 atmospheric_residue_initial_temp=atm_residue_start_temp_for_vacuum, # Pasa la T_inicial del residuo
+#                 verbose=True, 
+#                 api_sensitivity_factor=5.0
+#             )
 #             print("\nVacuum Products:")
 #             for prod in vacuum_products:
 #                 api_disp = f"{prod.api_cut:.1f}" if prod.api_cut is not None else "N/A"
 #                 s_disp = f"{prod.sulfur_cut_wt_percent:.4f}" if prod.sulfur_cut_wt_percent is not None else "N/A"
 #                 y_disp = f"{prod.yield_vol_percent:.2f}" if prod.yield_vol_percent is not None else "N/A"
-#                 print(f"  {prod.name}: YieldVol={y_disp}%, API={api_disp}, S_wt%={s_disp}")
+#                 print(f"  {prod.name}: T_init={prod.t_initial_C:.1f}, T_final={prod.t_final_C:.1f}, YieldVol={y_disp}%, API={api_disp}, S_wt%={s_disp}")
 #         else:
 #             print("Could not create vacuum feed.")
 #     else:
@@ -753,4 +853,3 @@ def calculate_vacuum_cuts(
 #     except Exception as e:
 #         print(f"ERROR in Escalante Blending Test: {e}")
 #         logging.exception("Exception in Escalante Blending Test")
-
