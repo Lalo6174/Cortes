@@ -1,41 +1,13 @@
+# Archivo: refinery_calculations.py
 import numpy as np
-import pandas as pd
+import pandas as pd # Importado por si se necesita en futuras expansiones
 import logging
 from typing import List, Dict, Any, Optional, Tuple
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configuración de logging (idealmente en el script principal)
+# logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(module)s - %(funcName)s - %(message)s')
 
-# Placeholder para las funciones de conversión de curvas de destilación
-# DEBERÁS IMPLEMENTAR ESTAS FUNCIONES CON CORRELACIONES REALES
-def placeholder_convert_d86_to_tbp(d86_data: List[Tuple[float, float]], api_gravity: Optional[float] = None) -> List[Tuple[float, float]]:
-    logging.warning("ASTM D86 to TBP conversion is a placeholder. Implement actual correlation.")
-    # Ejemplo: Simplemente devuelve los datos originales o una transformación muy básica.
-    # Esto NO es una conversión real.
-    # En una implementación real, se aplicarían ecuaciones de Edmister, API, etc.
-    # Por ejemplo, un simple ajuste (NO USAR EN PRODUCCIÓN):
-    # return [(vol, temp + 10) for vol, temp in d86_data] # Ejemplo de ajuste simple
-    return d86_data
-
-def placeholder_convert_d1160_to_tbp(d1160_data: List[Tuple[float, float]], api_gravity: Optional[float] = None) -> List[Tuple[float, float]]:
-    logging.warning("ASTM D1160 to TBP conversion is a placeholder. Implement actual correlation.")
-    # Convertir temperaturas de vacío a presión atmosférica y luego a TBP.
-    # Esto NO es una conversión real.
-    return d1160_data
-
-def placeholder_convert_d2887_to_tbp(d2887_data: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
-    logging.warning("ASTM D2887 (SimDis) to TBP conversion is a placeholder. Implement actual correlation.")
-    # SimDis es a menudo cercano a TBP, pero pueden ser necesarios ajustes.
-    # Esto NO es una conversión real.
-    return d2887_data
-
-def placeholder_convert_d7169_to_tbp(d7169_data: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
-    logging.warning("ASTM D7169 (SimDis High Temp) to TBP conversion is a placeholder. Implement actual correlation.")
-    # Similar a D2887 para crudos más pesados.
-    # Esto NO es una conversión real.
-    return d7169_data
-
-
+# --- Funciones de Utilidad a Nivel de Módulo ---
 def api_to_sg(api: Optional[float]) -> Optional[float]:
     """Convierte Gravedad API a Gravedad Específica (SG)."""
     if api is None:
@@ -43,6 +15,7 @@ def api_to_sg(api: Optional[float]) -> Optional[float]:
     try:
         return 141.5 / (float(api) + 131.5)
     except (ValueError, TypeError):
+        # No se usa self.name aquí porque es una función a nivel de módulo
         logging.warning(f"Could not convert API value '{api}' to float for SG calculation.")
         return None
 
@@ -57,580 +30,727 @@ def sg_to_api(sg: Optional[float]) -> Optional[float]:
             return None
         return (141.5 / sg_float) - 131.5
     except (ValueError, TypeError):
+        # No se usa self.name aquí
         logging.warning(f"Could not convert SG value '{sg}' to float for API calculation.")
         return None
 
+# --- Funciones de Conversión de Curvas de Destilación (Placeholders) ---
+def placeholder_convert_d86_to_tbp(d86_data: List[Tuple[float, float]], api_gravity: Optional[float] = None) -> List[Tuple[float, float]]:
+    logging.warning("ASTM D86 to TBP conversion is a placeholder. Implement actual correlation.")
+    return d86_data
+
+def placeholder_convert_d1160_to_tbp(d1160_data: List[Tuple[float, float]], api_gravity: Optional[float] = None) -> List[Tuple[float, float]]:
+    logging.warning("ASTM D1160 to TBP conversion is a placeholder. Implement actual correlation.")
+    return d1160_data
+
+def placeholder_convert_d2887_to_tbp(d2887_data: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    logging.warning("ASTM D2887 (SimDis) to TBP conversion is a placeholder. Implement actual correlation.")
+    return d2887_data
+
+def placeholder_convert_d7169_to_tbp(d7169_data: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    logging.warning("ASTM D7169 (SimDis High Temp) to TBP conversion is a placeholder. Implement actual correlation.")
+    return d7169_data
+
 class CrudeOil:
     """
-    Representa un crudo o una mezcla de crudos con sus propiedades básicas y curva de destilación.
-    Ahora incluye manejo para diferentes tipos de curvas de destilación de entrada, convirtiéndolas a TBP.
+    Represents a crude oil or a blend with its basic properties and distillation curve.
+    The internal distillation curve is always processed and stored as TBP equivalent.
     """
     def __init__(self, name: str, api_gravity: float, sulfur_content_wt_percent: float,
-                 distillation_data_percent_vol_temp_C: List[Tuple[float, float]],
-                 distillation_curve_type: str = "TBP", # Nuevo: TBP, ASTM D86, ASTM D1160, ASTM D2887, ASTM D7169
-                 verbose: bool = False, is_blend: bool = False):
+                 distillation_data_percent_vol_temp_C: list,
+                 distillation_curve_type: str = "TBP",
+                 is_blend: bool = False,
+                 verbose: bool = False):
+        
         self.name = name
-        self.api = float(api_gravity)
-        self.sg = api_to_sg(self.api)
-        self.sulfur_total_wt_percent = float(sulfur_content_wt_percent)
         self.verbose = verbose
-        self.is_blend = is_blend
-        self.is_refinery_scenario_source = False # Mantener si se usa en otro lado
-        self.original_feed_properties: Optional[Dict[str, Any]] = None # Mantener si se usa
-        self.original_feed_components: Optional[List[Dict[str,Any]]] = None # Mantener si se usa
 
-        self.original_distillation_data = distillation_data_percent_vol_temp_C
-        self.original_distillation_curve_type = distillation_curve_type.upper() # Guardar en mayúsculas para consistencia
-
-        # Convertir la curva de entrada a TBP para cálculos internos
-        tbp_curve_data = self._convert_to_tbp(
-            self.original_distillation_data,
-            self.original_distillation_curve_type,
-            self.api
-        )
-
-        if not tbp_curve_data: # Si la conversión falla o devuelve vacío
-            logging.error(f"CrudeOil '{self.name}': TBP curve data is empty after conversion attempt from {self.original_distillation_curve_type}.")
-            self.distillation_volumes_percent = np.array([])
-            self.distillation_temperatures_C = np.array([])
-            self.ibp_C = 0.0; self.fbp_C = 0.0; self.t50_C = 0.0; self.max_recovery_percent = 0.0
-            return
-
-        # El resto de la lógica de inicialización usa tbp_curve_data
-        try:
-            processed_dist_data = sorted(
-                [(float(p[0]), float(p[1])) for p in tbp_curve_data if isinstance(p, (tuple, list)) and len(p) == 2],
-                key=lambda x: x[0]
-            )
-        except (ValueError, TypeError) as e:
-            logging.error(f"CrudeOil '{self.name}': Invalid format in TBP distillation_data after conversion. Error: {e}")
-            processed_dist_data = [] # Asegurar que sea una lista vacía
-
-        if not processed_dist_data:
-            logging.error(f"CrudeOil '{self.name}': Distillation data is empty after processing TBP curve.")
-            self.distillation_volumes_percent = np.array([])
-            self.distillation_temperatures_C = np.array([])
-            self.ibp_C = 0.0; self.fbp_C = 0.0; self.t50_C = 0.0; self.max_recovery_percent = 0.0
-            return
-
-        volumes = [p[0] for p in processed_dist_data]
-        temps = [p[1] for p in processed_dist_data]
-
-        # Lógica existente para asegurar IBP al 0% y FBP al 100%
-        if 0.0 not in volumes:
-            logging.warning(f"CrudeOil '{self.name}' (TBP): 0% vol (IBP) not found. Prepending with first point's temp @ 0%.")
-            if temps: volumes.insert(0, 0.0); temps.insert(0, temps[0])
-            else: volumes.insert(0, 0.0); temps.insert(0, 0.0) # Caso extremo: curva vacía
-
-        if not volumes or volumes[-1] < 100.0: # Si está vacío o no llega al 100%
-            if len(volumes) >= 2:
-                delta_vol = volumes[-1] - volumes[-2]
-                if delta_vol == 0: temp_at_100 = temps[-1]
-                else: slope = (temps[-1] - temps[-2]) / delta_vol; temp_at_100 = temps[-1] + slope * (100.0 - volumes[-1])
-                volumes.append(100.0); temps.append(temp_at_100)
-            elif len(volumes) == 1: # Solo un punto (IBP)
-                volumes.append(100.0); temps.append(temps[0]) # Asumir FBP = IBP
-            else: # Curva vacía después de todo
-                volumes.extend([0.0, 100.0]); temps.extend([0.0, 0.0])
-
-
-        elif volumes[-1] > 100.0: # Si se pasa de 100%
-            idx_over_100 = next((i for i, v in enumerate(volumes) if v > 100.0), len(volumes))
-            volumes = volumes[:idx_over_100]; temps = temps[:idx_over_100]
-            if not volumes or volumes[-1] < 100.0: # Si al cortar queda por debajo de 100
-                 if len(volumes) >= 2:
-                    delta_vol = volumes[-1] - volumes[-2]
-                    if delta_vol == 0: temp_at_100 = temps[-1]
-                    else: slope = (temps[-1] - temps[-2]) / delta_vol; temp_at_100 = temps[-1] + slope * (100.0 - volumes[-1])
-                    volumes.append(100.0); temps.append(temp_at_100)
-                 elif volumes: # Solo un punto después del corte
-                     volumes.append(100.0); temps.append(temps[0])
-
-        self.distillation_volumes_percent = np.array(volumes)
-        self.distillation_temperatures_C = np.array(temps)
-
-        if not self.distillation_volumes_percent.size:
-            logging.error(f"CrudeOil '{self.name}': TBP Distillation curve empty after final processing.")
-            self.ibp_C = 0.0; self.fbp_C = 0.0; self.t50_C = 0.0; self.max_recovery_percent = 0.0; return
-
-        self.ibp_C = self.get_temperature_at_volume(0.0)
-        self.fbp_C = self.get_temperature_at_volume(100.0)
-        self.max_recovery_percent = 100.0 # Asumimos recuperación total para la curva TBP interna
-        self.t50_C = self.get_temperature_at_volume(50.0)
-
-        if self.t50_C <= 0 and self.verbose: logging.warning(f"CrudeOil '{self.name}': T50 ({self.t50_C}°C) <= 0 based on processed TBP.")
         if self.verbose:
-            sg_display = f"{self.sg:.4f}" if self.sg is not None else "N/A"
-            logging.info(f"CrudeOil '{self.name}' {'(Blend)' if self.is_blend else ''} initialized. API: {self.api:.1f}, SG: {sg_display}, Sulfur: {self.sulfur_total_wt_percent:.4f}% wt")
-            logging.info(f"  Original Curve Type: {self.original_distillation_curve_type}, Processed as TBP.")
-            logging.info(f"  TBP Dist curve ({len(self.distillation_volumes_percent)} pts): {self.ibp_C:.1f}°C (0%) to {self.fbp_C:.1f}°C (100%), T50: {self.t50_C:.1f}°C")
+            logging.info(f"CrudeOil INIT: Creating instance for '{self.name}'. Received distillation data type: {type(distillation_data_percent_vol_temp_C)}, first 5 points: {str(distillation_data_percent_vol_temp_C[:5]) if isinstance(distillation_data_percent_vol_temp_C, list) else 'Not a list'}")
 
-    def _convert_to_tbp(self, original_curve_data: List[Tuple[float, float]], curve_type: str, api_gravity: Optional[float]) -> List[Tuple[float, float]]:
-        """
-        Convierte la curva de destilación original a TBP.
-        ESTA FUNCIÓN UTILIZA PLACEHOLDERS. DEBE IMPLEMENTAR CORRELACIONES REALES.
-        """
-        if not original_curve_data:
-            logging.warning(f"Cannot convert empty original curve data for {self.name} (type: {curve_type}).")
-            return []
+        try:
+            self.api_gravity = float(api_gravity)
+        except (ValueError, TypeError) as e:
+            logging.error(f"CrudeOil INIT ERROR for '{self.name}': API gravity ('{api_gravity}') is not a valid number. Error: {e}")
+            raise ValueError(f"API gravity para '{self.name}' debe ser un número. Recibido: '{api_gravity}'. Error: {e}")
+        
+        try:
+            self.sulfur_total_wt_percent = float(sulfur_content_wt_percent)
+        except (ValueError, TypeError) as e:
+            logging.error(f"CrudeOil INIT ERROR for '{self.name}': Sulfur content ('{sulfur_content_wt_percent}') is not a valid number. Error: {e}")
+            raise ValueError(f"Contenido de azufre para '{self.name}' debe ser un número. Recibido: '{sulfur_content_wt_percent}'. Error: {e}")
+
+        self.original_raw_distillation_data = distillation_data_percent_vol_temp_C
+        self.original_distillation_curve_type = distillation_curve_type.upper()
+        self.is_blend = is_blend
+        
+        tbp_equivalent_curve_data = self._convert_to_tbp_if_needed(
+            distillation_data_percent_vol_temp_C,
+            self.original_distillation_curve_type,
+            self.api_gravity
+        )
+        
+        self._process_and_validate_distillation_curve(tbp_equivalent_curve_data)
+
+        self.sg = api_to_sg(self.api_gravity) # Usa la función a nivel de módulo
+        
+        if self.distillation_temperatures_C and len(self.distillation_temperatures_C) > 0:
+            self.ibp_C = self.distillation_temperatures_C[0]
+            self.fbp_C = self.distillation_temperatures_C[-1]
+            try:
+                self.t50_C = self.get_temp_at_volume(50.0)
+            except ValueError: # Handle case where get_temp_at_volume might fail (e.g. curve too short)
+                self.t50_C = (self.ibp_C + self.fbp_C) / 2 if self.ibp_C is not None and self.fbp_C is not None else None # Fallback simple
+                if self.verbose: logging.warning(f"Could not interpolate T50 for {self.name}, using midpoint as fallback.")
+        else:
+            self.ibp_C = None
+            self.fbp_C = None
+            self.t50_C = None
+            if self.verbose:
+                logging.warning(f"CrudeOil INIT WARN for '{self.name}': Distillation curve empty after processing. IBP/FBP/T50 could not be determined.")
+
+        if self.verbose:
+            ibp_display = f"{self.ibp_C:.1f}" if self.ibp_C is not None else "N/A"
+            fbp_display = f"{self.fbp_C:.1f}" if self.fbp_C is not None else "N/A"
+            t50_display = f"{self.t50_C:.1f}" if self.t50_C is not None else "N/A"
+            num_points = len(self.distillation_volumes_percent) if self.distillation_volumes_percent is not None else 0
+            
+            logging.info(f"CrudeOil INIT: Instance for '{self.name}' created. API: {self.api_gravity:.1f}, S: {self.sulfur_total_wt_percent:.2f}%")
+            logging.info(f"  Processed TBP IBP: {ibp_display}°C, FBP: {fbp_display}°C, T50: {t50_display}°C ({num_points} points)")
+
+    def _convert_to_tbp_if_needed(self, original_curve_data: list, curve_type: str, api_gravity_for_conversion: Optional[float]) -> List[Tuple[float, float]]:
+        valid_data_for_conversion = []
+        if not isinstance(original_curve_data, list):
+            if isinstance(original_curve_data, pd.DataFrame) and "Volumen (%)" in original_curve_data and "Temperatura (°C)" in original_curve_data:
+                logging.warning(f"Attempting to convert DataFrame to list of tuples for {self.name} in _convert_to_tbp_if_needed")
+                try:
+                    vols = pd.to_numeric(original_curve_data["Volumen (%)"], errors='coerce')
+                    temps = pd.to_numeric(original_curve_data["Temperatura (°C)"], errors='coerce')
+                    valid_indices = vols.notna() & temps.notna()
+                    original_curve_data = list(zip(vols[valid_indices], temps[valid_indices]))
+                except Exception as e:
+                    logging.error(f"Failed to convert DataFrame to list of tuples for {self.name} in _convert_to_tbp_if_needed: {e}")
+                    raise ValueError(f"Invalid distillation data format for {self.name} (DataFrame conversion failed)")
+            else:
+                logging.error(f"Invalid format for original_curve_data for {self.name} before conversion. Expected list, got {type(original_curve_data)}.")
+                raise ValueError(f"Invalid distillation data format for {self.name}")
+
+        for i, p in enumerate(original_curve_data):
+            if not (isinstance(p, (list, tuple)) and len(p) == 2):
+                logging.error(f"Point {i} in original_curve_data for {self.name} is not a pair: {p}")
+                raise ValueError(f"Invalid point format in distillation data for {self.name}")
+            try:
+                vol = float(p[0])
+                temp = float(p[1])
+                if pd.isna(vol) or pd.isna(temp):
+                     logging.warning(f"NaN found in point {i} for {self.name}: ({p[0]}, {p[1]}). Skipping point.")
+                     continue
+                valid_data_for_conversion.append((vol, temp))
+            except (ValueError, TypeError):
+                logging.error(f"Non-numeric data in point {i} for {self.name}: {p}")
+                raise ValueError(f"Non-numeric data in distillation point for {self.name}")
+        
+        if not valid_data_for_conversion and original_curve_data: 
+            logging.error(f"No valid numeric points found in original_curve_data for {self.name} after filtering NaNs/errors.")
+            raise ValueError(f"No valid numeric points in distillation data for {self.name}")
 
         if curve_type == "TBP":
-            return original_curve_data
+            return valid_data_for_conversion
         elif curve_type == "ASTM D86":
-            return placeholder_convert_d86_to_tbp(original_curve_data, api_gravity)
+            return placeholder_convert_d86_to_tbp(valid_data_for_conversion, api_gravity_for_conversion)
         elif curve_type == "ASTM D1160":
-            return placeholder_convert_d1160_to_tbp(original_curve_data, api_gravity)
+            return placeholder_convert_d1160_to_tbp(valid_data_for_conversion, api_gravity_for_conversion)
         elif curve_type == "ASTM D2887":
-            return placeholder_convert_d2887_to_tbp(original_curve_data)
+            return placeholder_convert_d2887_to_tbp(valid_data_for_conversion)
         elif curve_type == "ASTM D7169":
-            return placeholder_convert_d7169_to_tbp(original_curve_data)
-        else:
-            logging.warning(f"Unsupported distillation curve type '{curve_type}' for conversion. Using data as is (assumed TBP).")
-            return original_curve_data
-
-    def get_temperature_at_volume(self, percent_volume: float) -> float:
-        if not self.distillation_volumes_percent.size: return 0.0
-        # Asegurar que los puntos estén ordenados por volumen para np.interp
-        sorted_indices = np.argsort(self.distillation_volumes_percent)
-        sorted_vols = self.distillation_volumes_percent[sorted_indices]
-        sorted_temps = self.distillation_temperatures_C[sorted_indices]
-
-        left_val = sorted_temps[0] if sorted_temps.size > 0 else 0.0
-        right_val = sorted_temps[-1] if sorted_temps.size > 0 else 0.0
+            return placeholder_convert_d7169_to_tbp(valid_data_for_conversion)
         
-        return float(np.interp(percent_volume, sorted_vols, sorted_temps, left=left_val, right=right_val))
+        logging.warning(f"Unsupported/placeholder distillation curve type '{curve_type}' for conversion for crude '{self.name}'. Using data as is.")
+        return valid_data_for_conversion
 
-    def get_volume_at_temperature(self, temperature_C: float) -> float:
-        if not self.distillation_temperatures_C.size: return 0.0
-        # Asegurar que los puntos estén ordenados por temperatura para np.interp
-        # Si hay temperaturas duplicadas, np.interp puede comportarse de forma inesperada.
-        # Una forma de manejarlo es eliminar duplicados manteniendo el primer volumen.
-        unique_temps, unique_indices = np.unique(self.distillation_temperatures_C, return_index=True)
-        unique_vols = self.distillation_volumes_percent[unique_indices]
+    def _process_and_validate_distillation_curve(self, dist_data: list):
+        if self.verbose:
+            logging.info(f"_process_and_validate_distillation_curve for '{self.name}': Received type {type(dist_data)}. Data (first 5): {str(dist_data[:5]) if isinstance(dist_data, list) else 'Not a list'}")
 
-        # Ahora ordenar por estas temperaturas únicas
-        sorted_indices = np.argsort(unique_temps)
-        sorted_temps = unique_temps[sorted_indices]
-        sorted_vols = unique_vols[sorted_indices]
+        if not isinstance(dist_data, list):
+            logging.error(f"_process_and_validate_distillation_curve ERROR for '{self.name}': Expected a list of points, got {type(dist_data)}.")
+            raise ValueError(f"Formato/datos no numéricos en curva de destilación para '{self.name}': Se esperaba una lista de puntos, se obtuvo {type(dist_data)}.")
 
-        left_val = sorted_vols[0] if sorted_vols.size > 0 else 0.0
-        right_val = sorted_vols[-1] if sorted_vols.size > 0 else 100.0
+        processed_points = []
+        if not dist_data:
+            logging.warning(f"_process_and_validate_distillation_curve WARN for '{self.name}': Input distillation data list is empty.")
+        
+        for i, point in enumerate(dist_data):
+            if self.verbose:
+                logging.debug(f"  Processing point {i+1}/{len(dist_data)}: '{str(point)}' (type: {type(point)})")
+            if not isinstance(point, (list, tuple)) or len(point) != 2:
+                logging.error(f"_process_and_validate_distillation_curve ERROR for '{self.name}': Point {i+1} ('{str(point)}') is not tuple/list of 2 elements.")
+                raise ValueError(f"Formato/datos no numéricos en curva de destilación para '{self.name}': El punto {i+1} ('{str(point)}') no es una tupla/lista de 2 elementos.")
+            try:
+                vol_percent = float(point[0])
+                temp_c = float(point[1])
+                if pd.isna(vol_percent) or pd.isna(temp_c): 
+                    raise ValueError("Contiene NaN")
+            except (ValueError, TypeError) as e:
+                logging.error(f"_process_and_validate_distillation_curve ERROR for '{self.name}': Point {i+1} ('{str(point)}') contains non-numeric values or NaN. Error: {e}")
+                raise ValueError(f"Formato/datos no numéricos en curva de destilación para '{self.name}': El punto {i+1} ('{str(point)}') contiene valores no numéricos o NaN. Error: {e}")
+            
+            if not (0 <= vol_percent <= 100):
+                 if self.verbose: 
+                    logging.warning(f"  Warning for '{self.name}': Distillation point {point} with volume ({vol_percent}%) outside [0,100]. It will be included.")
+            
+            processed_points.append((vol_percent, temp_c))
 
-        return float(np.interp(temperature_C, sorted_temps, sorted_vols, left=left_val, right=right_val))
+        if len(processed_points) < 2:
+            logging.error(f"_process_and_validate_distillation_curve ERROR for '{self.name}': Less than 2 valid points ({len(processed_points)}). Points: {str(processed_points)}")
+            self.distillation_volumes_percent = []
+            self.distillation_temperatures_C = []
+            raise ValueError(f"Curva de destilación para '{self.name}' tiene menos de 2 puntos válidos después del procesamiento. Se requieren al menos IBP y FBP. Puntos procesados: {str(processed_points)}")
+
+        processed_points.sort(key=lambda x: x[0])
+        
+        unique_points_dict = {vol: temp for vol, temp in processed_points}
+        unique_sorted_points = sorted(unique_points_dict.items())
+
+        self.distillation_volumes_percent = [p[0] for p in unique_sorted_points]
+        self.distillation_temperatures_C = [p[1] for p in unique_sorted_points]
+
+        if 0.0 not in self.distillation_volumes_percent:
+            logging.error(f"_process_and_validate_distillation_curve ERROR for '{self.name}': Curve does not include 0% vol (IBP). Volumes: {str(self.distillation_volumes_percent)}")
+            raise ValueError(f"Curva de destilación para '{self.name}' debe incluir un punto para 0% vol (IBP). Puntos de volumen: {str(self.distillation_volumes_percent)}")
+        
+        if 100.0 not in self.distillation_volumes_percent:
+            logging.warning(f"_process_and_validate_distillation_curve WARN for '{self.name}': Curve does not include 100% vol (FBP). Volumes: {str(self.distillation_volumes_percent)}. Last point will be considered FBP.")
+
+        if self.verbose:
+            logging.info(f"_process_and_validate_distillation_curve for '{self.name}': Processing successful. {len(self.distillation_volumes_percent)} unique valid points.")
+
+    def get_temp_at_volume(self, target_volume_percent: float) -> float:
+        if not self.distillation_volumes_percent or not self.distillation_temperatures_C or len(self.distillation_volumes_percent) < 2:
+            logging.error(f"get_temp_at_volume ERROR for '{self.name}': Distillation curve not available or incomplete ({len(self.distillation_volumes_percent)} points) for interpolation at {target_volume_percent}%.")
+            raise ValueError(f"Curva de destilación no disponible o incompleta para '{self.name}' para interpolar.")
+        
+        vol_array = np.array(self.distillation_volumes_percent)
+        temp_array = np.array(self.distillation_temperatures_C)
+        
+        if self.verbose and (target_volume_percent < vol_array[0] or target_volume_percent > vol_array[-1]):
+            logging.warning(f"  Warning for '{self.name}' in get_temp_at_volume: Extrapolating temperature for {target_volume_percent}%. Curve range: [{vol_array[0]}%, {vol_array[-1]}%]")
+        
+        return float(np.interp(target_volume_percent, vol_array, temp_array))
+
+    def get_volume_at_temp(self, target_temp_C: float) -> float:
+        if not self.distillation_volumes_percent or not self.distillation_temperatures_C or len(self.distillation_volumes_percent) < 2:
+            logging.error(f"get_volume_at_temp ERROR for '{self.name}': Distillation curve not available or incomplete for interpolation at {target_temp_C}°C.")
+            raise ValueError(f"Curva de destilación no disponible o incompleta para '{self.name}' para interpolar.")
+
+        vol_array = np.array(self.distillation_volumes_percent)
+        temp_array = np.array(self.distillation_temperatures_C)
+
+        if not np.all(np.diff(temp_array) >= 0): 
+            if self.verbose:
+                logging.warning(f"  Warning for '{self.name}' in get_volume_at_temp: Temperature array is not strictly monotonically increasing. Interpolation might be affected.")
+        
+        min_temp, max_temp = temp_array[0], temp_array[-1]
+        if target_temp_C < min_temp:
+            if self.verbose: logging.warning(f"  Target temp {target_temp_C}°C is below IBP {min_temp}°C for '{self.name}'. Result will be 0%.")
+            return 0.0
+        if target_temp_C > max_temp:
+            if self.verbose: logging.warning(f"  Target temp {target_temp_C}°C is above FBP {max_temp}°C for '{self.name}'. Result will be 100%.")
+            return 100.0
+            
+        return float(np.interp(target_temp_C, temp_array, vol_array))
 
     def __repr__(self):
         sg_display = f"{self.sg:.4f}" if self.sg is not None else "N/A"
-        return (f"CrudeOil('{self.name}', API={self.api:.1f}, SG={sg_display}, S={self.sulfur_total_wt_percent}%, "
-                f"OriginalCurve: {self.original_distillation_curve_type}, TBP_Pts={len(self.distillation_volumes_percent)})")
+        ibp_repr = f"{self.ibp_C:.1f}" if self.ibp_C is not None else "N/A"
+        fbp_repr = f"{self.fbp_C:.1f}" if self.fbp_C is not None else "N/A"
+        t50_repr = f"{self.t50_C:.1f}" if self.t50_C is not None else "N/A"
+        
+        return (f"CrudeOil('{self.name}', API={self.api_gravity:.1f}, SG={sg_display}, S={self.sulfur_total_wt_percent:.2f}%, "
+                f"OrigCurveType: {self.original_distillation_curve_type}, TBP_Pts={len(self.distillation_volumes_percent) if self.distillation_volumes_percent else 0}, "
+                f"IBP={ibp_repr}, FBP={fbp_repr}, T50={t50_repr})")
 
-def create_blend_from_crudes(crude_components_data_list: List[Dict[str, Any]], verbose: bool = False) -> CrudeOil:
-    if not crude_components_data_list: raise ValueError("Lista de componentes vacía.")
-    total_prop = sum(float(c.get('proportion_vol', 0.0)) for c in crude_components_data_list)
-    if not np.isclose(total_prop, 100.0): raise ValueError(f"Suma de proporciones ({total_prop}%) no es 100%.")
 
-    components = []
-    for comp_data in crude_components_data_list:
-        dist_tuples = comp_data.get('distillation_data', [])
-        dist_curve_type = comp_data.get('distillation_curve_type', "TBP") # Obtener el tipo de curva
+def create_blend_from_crudes(components_data_list: List[Dict[str, Any]], verbose: bool = False) -> CrudeOil:
+    if not components_data_list:
+        logging.error("create_blend_from_crudes ERROR: The component list is empty.")
+        raise ValueError("La lista de componentes no puede estar vacía para crear una mezcla.")
+    
+    if verbose:
+        logging.info(f"create_blend_from_crudes: Starting blend creation with {len(components_data_list)} components.")
 
-        if not dist_tuples or not all(isinstance(p,(list,tuple)) and len(p)==2 and isinstance(p[0],(int,float)) and isinstance(p[1],(int,float)) for p in dist_tuples):
-             raise ValueError(f"Formato/datos no numéricos en curva de destilación para {comp_data.get('name', 'Desconocido')}")
+    actual_total_proportion = 0.0
+    blended_api_sum_product = 0.0
+    blended_sulfur_sum_product = 0.0
+    component_crude_objects_for_blend = []
+
+    for i, comp_data in enumerate(components_data_list):
+        comp_name_for_log = str(comp_data.get('name', f'Unknown Comp {i+1}'))
+        if verbose:
+            logging.info(f"  Processing component {i+1}/{len(components_data_list)} for blend: '{comp_name_for_log}'")
+
         try:
-            crude_obj = CrudeOil(
-                name=str(comp_data.get('name','?')),
-                api_gravity=float(comp_data.get('api',0.0)),
-                sulfur_content_wt_percent=float(comp_data.get('sulfur',0.0)),
-                distillation_data_percent_vol_temp_C=[(float(p[0]), float(p[1])) for p in dist_tuples],
-                distillation_curve_type=dist_curve_type, # Pasar el tipo de curva
+            proportion = float(comp_data.get('proportion_vol', 0.0))
+        except (ValueError, TypeError):
+            logging.error(f"  Invalid proportion for component '{comp_name_for_log}'. Skipping.")
+            continue
+
+        if proportion <= 1e-6:
+            if verbose: logging.info(f"    Component '{comp_name_for_log}' skipped (proportion <= 0).")
+            continue
+        
+        current_dist_data = comp_data.get('distillation_data', [])
+        if verbose: 
+            logging.info(f"    For '{comp_name_for_log}': Type of distillation_data received: {type(current_dist_data)}")
+            if isinstance(current_dist_data, list):
+                logging.info(f"    For '{comp_name_for_log}': distillation_data (first 5 points): {str(current_dist_data[:5])}")
+                for idx, point_data in enumerate(current_dist_data[:5]):
+                    logging.info(f"      Point {idx}: '{str(point_data)}', Type: {type(point_data)}")
+                    if isinstance(point_data, (list, tuple)) and len(point_data) == 2:
+                        val1_type = type(point_data[0]); val2_type = type(point_data[1])
+                        logging.info(f"        Val1: '{str(point_data[0])}' (Type {val1_type}), Val2: '{str(point_data[1])}' (Type {val2_type})")
+                    elif isinstance(point_data, (list, tuple)):
+                         logging.warning(f"        Point {idx} is tuple/list but not 2 elements: length {len(point_data)}")
+            else:
+                logging.warning(f"    For '{comp_name_for_log}': distillation_data IS NOT A LIST.")
+
+        try:
+            crude_comp_obj = CrudeOil(
+                name=comp_name_for_log,
+                api_gravity=float(comp_data.get('api')),
+                sulfur_content_wt_percent=float(comp_data.get('sulfur')),
+                distillation_data_percent_vol_temp_C=current_dist_data,
+                distillation_curve_type=str(comp_data.get('distillation_curve_type', 'TBP')),
                 verbose=verbose
             )
-        except Exception as e: raise ValueError(f"Error creando CrudeOil para {comp_data.get('name','?')}: {e}")
+            component_crude_objects_for_blend.append({'obj': crude_comp_obj, 'proportion_vol': proportion})
+            blended_api_sum_product += crude_comp_obj.api_gravity * proportion
+            blended_sulfur_sum_product += crude_comp_obj.sulfur_total_wt_percent * proportion
+            actual_total_proportion += proportion
+        except ValueError as e:
+            logging.error(f"create_blend_from_crudes ERROR: Failed to process component '{comp_name_for_log}' for blend. Error: {e}")
+            raise ValueError(f"Error al procesar componente '{comp_name_for_log}' para la mezcla: {e}")
+        except Exception as e_generic:
+            logging.error(f"create_blend_from_crudes UNEXPECTED ERROR: Failed to process component '{comp_name_for_log}'. Error: {e_generic}")
+            raise Exception(f"Error inesperado al procesar componente '{comp_name_for_log}' para la mezcla: {e_generic}")
 
-        if crude_obj.sg is None: raise ValueError(f"SG no calculado para {crude_obj.name} (API: {crude_obj.api}).")
-        components.append({'obj': crude_obj, 'proportion_vol': float(comp_data.get('proportion_vol',0.0))/100.0})
+    if actual_total_proportion <= 1e-6:
+        logging.error("create_blend_from_crudes ERROR: Total proportion of valid components is zero.")
+        raise ValueError("La proporción total de los componentes válidos es cero. No se puede calcular la mezcla.")
 
-    # Los cálculos de propiedades de la mezcla se basan en las propiedades individuales
-    # y las curvas TBP (ya convertidas dentro de cada CrudeOil)
-    sg_b = sum(c['obj'].sg * c['proportion_vol'] for c in components if c['obj'].sg is not None)
-    api_b = sg_to_api(sg_b)
-    if api_b is None: raise ValueError("API de mezcla no calculable.")
+    if not np.isclose(actual_total_proportion, 100.0, atol=0.1): 
+        if verbose:
+            logging.warning(f"  Sum of valid component proportions is {actual_total_proportion}%. API/Sulfur will be based on this sum.")
+    
+    final_blended_api = blended_api_sum_product / actual_total_proportion
+    final_blended_sulfur = blended_sulfur_sum_product / actual_total_proportion
 
-    sulfur_b = sum(c['obj'].sulfur_total_wt_percent * (c['proportion_vol'] * c['obj'].sg / sg_b) for c in components if sg_b!=0 and c['obj'].sg is not None)
+    component_display_names = [c['obj'].name for c in component_crude_objects_for_blend]
+    final_blended_name = "Mezcla de " + ", ".join(component_display_names)
+    
+    final_blended_distillation_data = []
+    final_blended_curve_type = "TBP"
 
-    # La curva TBP de la mezcla se calcula promediando las temperaturas de las curvas TBP de los componentes
-    vols_blend = np.linspace(0,100,21) # Puntos estándar para la curva de mezcla
-    temps_blend = []
-    for v_target in vols_blend:
-        weighted_temp_sum = 0
-        for c in components:
-            # c['obj'].get_temperature_at_volume() opera sobre la curva TBP interna del componente
-            weighted_temp_sum += c['obj'].get_temperature_at_volume(v_target) * c['proportion_vol']
-        temps_blend.append(weighted_temp_sum)
+    if component_crude_objects_for_blend:
+        all_vol_points_set = set()
+        for comp_item in component_crude_objects_for_blend:
+            if comp_item['obj'].distillation_volumes_percent:
+                all_vol_points_set.update(comp_item['obj'].distillation_volumes_percent)
+        all_vol_points = sorted(list(all_vol_points_set))
+        
+        if not all_vol_points:
+             final_blended_distillation_data = [(0.0, 60.0), (100.0, 500.0)]
+             if verbose: logging.warning("  Warning: No component had a valid distillation curve; using generic default curve for the blend.")
+        else:
+            if 0.0 not in all_vol_points: all_vol_points.insert(0, 0.0)
+            if 100.0 not in all_vol_points: all_vol_points.append(100.0)
+            all_vol_points = sorted(list(set(all_vol_points)))
 
-    dist_b_tbp = list(zip(vols_blend, temps_blend))
-    name_b = "Mezcla ("+", ".join([f"{c['obj'].name} {c['proportion_vol']*100:.0f}%" for c in components])+")"
+            for vol_p in all_vol_points:
+                weighted_temp_sum = 0.0
+                sum_of_proportions_at_this_vol = 0.0
+                for comp_item in component_crude_objects_for_blend:
+                    comp_obj = comp_item['obj']
+                    comp_prop_normalized = (comp_item['proportion_vol'] / actual_total_proportion) if actual_total_proportion > 0 else 0
+                    try:
+                        temp_at_vol = comp_obj.get_temp_at_volume(vol_p)
+                        weighted_temp_sum += temp_at_vol * comp_prop_normalized
+                        sum_of_proportions_at_this_vol += comp_prop_normalized
+                    except ValueError:
+                        if verbose: logging.debug(f"    Debug: Could not get temp for {vol_p}% in {comp_obj.name} during blend curve calculation (likely out of range for this comp).")
+                        pass
+                
+                if sum_of_proportions_at_this_vol > 1e-6:
+                    avg_temp_at_vol = weighted_temp_sum / sum_of_proportions_at_this_vol
+                    final_blended_distillation_data.append((vol_p, avg_temp_at_vol))
+                elif verbose:
+                     logging.debug(f"    Debug: Could not calculate blended temp for {vol_p}% (no significant component contribution).")
+            
+            if len(final_blended_distillation_data) < 2:
+                if verbose: logging.warning(f"  Warning: Blended distillation curve resulted in less than 2 points ({str(final_blended_distillation_data)}). Using generic default curve.")
+                final_blended_distillation_data = [(0.0, 60.0), (100.0, 500.0)]
+    else:
+        final_blended_distillation_data = [(0.0, 60.0), (100.0, 500.0)]
+        if verbose: logging.warning("  Warning: No valid components for blend; using generic default curve for the blend.")
 
-    if verbose: logging.info(f"Blend '{name_b}': API {api_b:.1f}, SG {sg_b:.4f}, S {sulfur_b:.4f}%wt. Blend TBP curve calculated.")
+    if final_blended_distillation_data and final_blended_distillation_data[0][0] != 0.0:
+        if final_blended_distillation_data[0][0] > 0.0 and len(final_blended_distillation_data) >=1 : 
+            logging.warning(f"  Blended curve missing 0% IBP. Prepending with first point's temperature. First point: {final_blended_distillation_data[0]}")
+            final_blended_distillation_data.insert(0, (0.0, final_blended_distillation_data[0][1]))
+        elif not final_blended_distillation_data : 
+             logging.warning(f"  Blended curve is empty and missing 0% IBP. Setting to default.")
+             final_blended_distillation_data = [(0.0, 60.0), (100.0, 500.0)]
 
-    # La mezcla se crea directamente con su curva TBP calculada.
-    # El 'distillation_curve_type' de la mezcla será "TBP".
-    return CrudeOil(name_b, api_b, sulfur_b, dist_b_tbp, distillation_curve_type="TBP", verbose=verbose, is_blend=True)
+    blend_properties_dict = {
+        'name': final_blended_name,
+        'api_gravity': final_blended_api,
+        'sulfur_content_wt_percent': final_blended_sulfur,
+        'distillation_data_percent_vol_temp_C': final_blended_distillation_data,
+        'distillation_curve_type': final_blended_curve_type,
+        'is_blend': True,
+        'verbose': verbose
+    }
+    if verbose:
+        logging.info(f"create_blend_from_crudes: Creating final CrudeOil object for the blend '{final_blended_name}'.")
+    
+    blended_crude_oil_object = CrudeOil(**blend_properties_dict)
 
+    if verbose:
+        logging.info(f"create_blend_from_crudes: Blend '{blended_crude_oil_object.name}' created successfully. API: {blended_crude_oil_object.api_gravity:.1f}")
+    return blended_crude_oil_object
 
 class DistillationCut:
-    def __init__(self, name: str, t_initial_C: float, t_final_C: float, crude_oil_ref: CrudeOil):
-        self.name = name; self.t_initial_C = float(t_initial_C); self.t_final_C = float(t_final_C)
-        self.crude_oil = crude_oil_ref; self.yield_vol_percent: Optional[float]=0.0; self.vabp_C: Optional[float]=None
-        self.api_cut: Optional[float]=None; self.sg_cut: Optional[float]=None; self.yield_wt_percent: Optional[float]=0.0
-        self.sulfur_cut_wt_percent: Optional[float]=0.0; self.sulfur_cut_ppm: Optional[float]=0.0
-        self.distillation_curve: Optional[List[Tuple[float,float]]]=None
-        # La propiedad is_gas_cut se basa en la temperatura final del corte, no en el tipo de curva del crudo
-        self.is_gas_cut = name.lower().startswith("gas") and self.t_final_C<=40 # Ajustar si es necesario
+    def __init__(self, name: str, t_initial_C: float, t_final_C: float, 
+                 crude_oil_feed: CrudeOil, 
+                 api_sensitivity_factor: float = 7.0, 
+                 verbose: bool = False):
+        self.name = name
+        self.t_initial_C = float(t_initial_C)
+        self.t_final_C = float(t_final_C)
+        self.crude_oil_feed = crude_oil_feed 
+        self.api_sensitivity_factor = api_sensitivity_factor
+        self.verbose = verbose
 
-    def _estimate_distillation_curve(self):
-        if self.yield_vol_percent is None or self.yield_vol_percent<=1e-6 or self.t_final_C<=self.t_initial_C: return None
-        vabp = self.vabp_C if self.vabp_C is not None else (self.t_initial_C+self.t_final_C)/2.0
-        if self.is_gas_cut: return [(0.0,self.t_initial_C),(50.0,vabp),(100.0,self.t_final_C)] # Curva simple para gases
-        # Estimación de curva para productos líquidos (podría mejorarse con correlaciones)
-        vols=[0,5,10,30,50,70,90,95,100.0]; temps=[]
-        for v in vols:
-            # Función sigmoide simple para dar forma a la curva entre T_inicial, VABP y T_final
-            # Esto es una simplificación y podría reemplazarse por métodos más rigurosos.
-            if v < 50: # De IBP a VABP
-                f = v / 50.0 # Fracción lineal hasta VABP
-                t = self.t_initial_C + f * (vabp - self.t_initial_C)
-            else: # De VABP a FBP
-                f = (v - 50.0) / 50.0 # Fracción lineal desde VABP
-                t = vabp + f * (self.t_final_C - vabp)
-            temps.append(float(t))
-        return list(zip(vols,temps))
+        self.yield_vol_percent: Optional[float] = None
+        self.vabp_C: Optional[float] = None 
+        self.api_cut: Optional[float] = None
+        self.sg_cut: Optional[float] = None
+        self.yield_wt_percent: Optional[float] = None
+        self.sulfur_cut_wt_percent: Optional[float] = None
+        self.sulfur_cut_ppm: Optional[float] = None
+        self.is_gas_cut: bool = name.lower().startswith("gas") and self.t_final_C <= 40 
 
-    def _estimate_api_cut_placeholder(self, api_sensitivity_factor: float = 7.0) -> Optional[float]:
-        if self.is_gas_cut: return 110.0 # API típico para gases (muy ligero)
-        if self.vabp_C is None: return None
-        # crude_oil.t50_C y crude_oil.api se refieren a la curva TBP del crudo
-        t50_crude_tbp = self.crude_oil.t50_C if self.crude_oil.t50_C > 0 else self.vabp_C # Usar VABP del corte si T50 del crudo no es válido
-        tdiff_factor = (self.vabp_C - t50_crude_tbp) / 100.0 # Factor de diferencia de temperatura
-        api_est = self.crude_oil.api - (tdiff_factor * api_sensitivity_factor)
-        return max(0.1,min(api_est,120.0)) # Asegurar que esté en un rango razonable
+        self._calculate_properties()
 
-    def calculate_basic_properties(self, api_sensitivity_factor: float = 7.0):
-        if self.is_gas_cut and self.t_initial_C > -50: self.t_initial_C=min(self.t_initial_C,-40.0) # Ajustar T_inicial para gases
+    def _calculate_properties(self):
+        if self.crude_oil_feed.distillation_volumes_percent is None or not self.crude_oil_feed.distillation_volumes_percent:
+            if self.verbose: logging.warning(f"Cannot calculate properties for cut '{self.name}', feed crude '{self.crude_oil_feed.name}' has no distillation curve.")
+            return
 
-        # Los volúmenes se obtienen de la curva TBP del crudo
-        v_init=self.crude_oil.get_volume_at_temperature(self.t_initial_C)
-        v_fin=self.crude_oil.get_volume_at_temperature(self.t_final_C)
-        self.yield_vol_percent=abs(v_fin-v_init)
+        vol_at_t_initial = self.crude_oil_feed.get_volume_at_temp(self.t_initial_C)
+        vol_at_t_final = self.crude_oil_feed.get_volume_at_temp(self.t_final_C)
+        self.yield_vol_percent = max(0.0, vol_at_t_final - vol_at_t_initial)
 
-        if self.yield_vol_percent is not None and self.yield_vol_percent > 1e-6:
-            if self.is_gas_cut: self.vabp_C=(self.t_initial_C+self.t_final_C)/2.0
-            else: # El VABP se calcula sobre la curva TBP del crudo
-                self.vabp_C=self.crude_oil.get_temperature_at_volume(v_init+(self.yield_vol_percent/2.0))
-        else: self.vabp_C=(self.t_initial_C+self.t_final_C)/2.0
+        if self.yield_vol_percent < 1e-6: 
+            if self.verbose: logging.info(f"Cut '{self.name}' has ~zero yield ({self.yield_vol_percent:.4f}%). Properties will be None or default.")
+            self.api_cut = None 
+            self.sg_cut = None
+            self.sulfur_cut_wt_percent = 0.0 
+            self.sulfur_cut_ppm = 0.0
+            self.yield_wt_percent = 0.0
+            self.vabp_C = (self.t_initial_C + self.t_final_C) / 2.0 
+            return
 
-        if self.vabp_C is not None or self.is_gas_cut:
-            self.api_cut=self._estimate_api_cut_placeholder(api_sensitivity_factor=api_sensitivity_factor)
-        self.sg_cut=api_to_sg(self.api_cut)
+        vol_mid_point_of_cut = vol_at_t_initial + self.yield_vol_percent / 2.0
+        self.vabp_C = self.crude_oil_feed.get_temp_at_volume(vol_mid_point_of_cut)
+        
+        if self.crude_oil_feed.t50_C is not None and self.vabp_C is not None and self.crude_oil_feed.api_gravity is not None:
+            api_deviation = (self.crude_oil_feed.t50_C - self.vabp_C) / self.api_sensitivity_factor 
+            self.api_cut = self.crude_oil_feed.api_gravity + api_deviation
+            self.api_cut = max(0.0, min(100.0, self.api_cut)) if self.api_cut is not None else None
+        else: 
+            self.api_cut = self.crude_oil_feed.api_gravity 
 
-        if self.yield_vol_percent is not None and self.sg_cut is not None and self.crude_oil.sg is not None and self.crude_oil.sg>1e-6:
-            # Factor de corrección para gases (menor densidad)
-            density_correction_factor = 0.85 if self.is_gas_cut else 1.0
-            self.yield_wt_percent = self.yield_vol_percent * (self.sg_cut / self.crude_oil.sg) * density_correction_factor
-        else: self.yield_wt_percent=0.0
+        self.sg_cut = api_to_sg(self.api_cut) # Usa la función a nivel de módulo
 
-        self.distillation_curve=self._estimate_distillation_curve() # Estimar curva TBP del corte
-
-    def set_sulfur_properties(self, s_wt:Optional[float]):
-        if s_wt is not None:
-            # Ajuste simple para azufre en gases (menor concentración)
-            s_effective = min(float(s_wt) * 0.3, 0.1) if self.is_gas_cut else float(s_wt)
-            self.sulfur_cut_wt_percent = s_effective
-            self.sulfur_cut_ppm = s_effective * 10000.0
+        if self.sg_cut is not None and self.crude_oil_feed.sg is not None and self.crude_oil_feed.sg > 1e-6:
+            density_correction = 0.85 if self.is_gas_cut else 1.0 
+            self.yield_wt_percent = self.yield_vol_percent * (self.sg_cut / self.crude_oil_feed.sg) * density_correction
         else:
-            self.sulfur_cut_wt_percent=0.0; self.sulfur_cut_ppm=0.0
+            self.yield_wt_percent = self.yield_vol_percent 
 
-    def get_distillation_data(self): return pd.DataFrame(self.distillation_curve,columns=["Volumen (%)","Temperatura (°C)"]) if self.distillation_curve else pd.DataFrame(columns=["Volumen (%)","Temperatura (°C)"])
-    def to_dict(self): return {"Corte":self.name,"T Inicial (°C)":self.t_initial_C,"T Final (°C)":self.t_final_C,"Rend. Vol (%)":self.yield_vol_percent,
-                               "Rend. Peso (%)":self.yield_wt_percent,"VABP (°C)":self.vabp_C,"API Corte":self.api_cut,"SG Corte":self.sg_cut,
-                               "Azufre (%peso)":self.sulfur_cut_wt_percent,"Azufre (ppm)":self.sulfur_cut_ppm}
-    def __repr__(self): return f"DistillationCut('{self.name}',YVol={self.yield_vol_percent:.2f if self.yield_vol_percent is not None else 'NA'}%,S_wt={self.sulfur_cut_wt_percent:.4f if self.sulfur_cut_wt_percent is not None else 'NA'}%)"
-
-# --- Funciones de Cálculo de Torres ---
-# Estas funciones operan sobre un CrudeOil que ya tiene su curva procesada como TBP.
-# No necesitan conocer el tipo de curva original del crudo.
-
-def calculate_distillation_cuts(crude_oil: CrudeOil, cut_definitions: List[Tuple[str, float]],
-                                verbose: bool = False, api_sensitivity_factor: float = 7.0,
-                                empirical_data: Optional[Dict[str, Any]] = None) -> List[DistillationCut]:
-    """
-    Calcula los cortes de destilación para un crudo dado (que ya tiene su curva como TBP).
-    """
-    if verbose: logging.info(f"\n--- Calculating Cuts for Feed '{crude_oil.name}' (API Sens: {api_sensitivity_factor}) ---")
-    # crude_oil.ibp_C, crude_oil.fbp_C, crude_oil.t50_C ya están basados en la TBP interna.
-
-    if empirical_data and isinstance(empirical_data.get('distribution_data'), dict) and empirical_data['distribution_data'].get('cuts'):
-        logging.info(f"Applying empirical cut distribution for {crude_oil.name} based on provided empirical_data.")
-        return apply_empirical_distribution(crude_oil, cut_definitions, empirical_data, verbose, api_sensitivity_factor)
-
-    cuts_output = []
-    current_t_initial_C = crude_oil.ibp_C # IBP de la TBP del crudo
-    for i, (cut_name, cut_t_final_C_val) in enumerate(cut_definitions):
-        t_start = current_t_initial_C; t_end = float(cut_t_final_C_val)
-        cut = DistillationCut(name=cut_name, t_initial_C=t_start, t_final_C=t_end, crude_oil_ref=crude_oil)
-        cut.calculate_basic_properties(api_sensitivity_factor=api_sensitivity_factor)
-        if t_end < t_start:
-            if verbose: logging.warning(f"T_final ({t_end}°C) for '{cut_name}' < T_initial ({t_start}°C). Yield set to 0.")
-            cut.yield_vol_percent = 0.0; cut.yield_wt_percent = 0.0
-        cuts_output.append(cut)
-        current_t_initial_C = t_end
-
-    if current_t_initial_C < crude_oil.fbp_C : # FBP de la TBP del crudo
-        residue_name_inferred = f"Residuo de {crude_oil.name}"
-        if not (cut_definitions and cut_definitions[-1][0].lower().startswith("residuo")):
-            residue_cut = DistillationCut(name=residue_name_inferred, t_initial_C=current_t_initial_C, t_final_C=crude_oil.fbp_C, crude_oil_ref=crude_oil)
-            residue_cut.calculate_basic_properties(api_sensitivity_factor=api_sensitivity_factor)
-            vol_at_residue_start = crude_oil.get_volume_at_temperature(current_t_initial_C)
-            residue_cut.yield_vol_percent = 100.0 - vol_at_residue_start # Rendimiento sobre base TBP 100%
-            if residue_cut.sg_cut and crude_oil.sg and crude_oil.sg > 1e-6 and residue_cut.yield_vol_percent is not None:
-                 residue_cut.yield_wt_percent = residue_cut.yield_vol_percent * (residue_cut.sg_cut / crude_oil.sg)
-            else: residue_cut.yield_wt_percent = 0.0
-            cuts_output.append(residue_cut)
-
-    total_crude_sulfur = crude_oil.sulfur_total_wt_percent
-    if total_crude_sulfur > 0:
-        total_yield_wt = sum(c.yield_wt_percent for c in cuts_output if c.yield_wt_percent is not None)
-        if total_yield_wt > 1e-6:
-            denominator = sum(((c.vabp_C / crude_oil.t50_C if crude_oil.t50_C > 1e-6 and c.vabp_C is not None else 1.0) * (c.yield_wt_percent if c.yield_wt_percent is not None else 0.0))
-                              for c in cuts_output if c.yield_wt_percent is not None and c.yield_wt_percent > 0)
-            if abs(denominator) > 1e-9:
-                factor_s = (total_crude_sulfur * total_yield_wt) / denominator
-                for cut in cuts_output:
-                    if cut.vabp_C is not None and cut.yield_wt_percent is not None and cut.yield_wt_percent > 0:
-                        vabp_ratio = cut.vabp_C / crude_oil.t50_C if crude_oil.t50_C > 1e-6 else 1.0
-                        sulfur_c = factor_s * vabp_ratio
-                        cut.set_sulfur_properties(max(0, min(sulfur_c, total_crude_sulfur * 10)))
-                    else: cut.set_sulfur_properties(0.0)
-            elif verbose:
-                logging.warning(f"Sulfur model failed for {crude_oil.name}. Distributing S uniformly by weight yield.")
-                for cut in cuts_output:
-                    s_dist = total_crude_sulfur * (cut.yield_wt_percent / total_yield_wt) if cut.yield_wt_percent and cut.yield_wt_percent > 0 and total_yield_wt > 0 else 0.0
-                    cut.set_sulfur_properties(s_dist)
+        if self.api_cut is not None and self.crude_oil_feed.api_gravity is not None and self.crude_oil_feed.sulfur_total_wt_percent is not None:
+            sulfur_ratio_factor = (self.crude_oil_feed.api_gravity / self.api_cut) if self.api_cut > 1e-6 else 1.0
+            sulfur_ratio_factor = max(0.1, min(3.0, sulfur_ratio_factor)) 
+            estimated_sulfur = self.crude_oil_feed.sulfur_total_wt_percent * sulfur_ratio_factor
+            self.sulfur_cut_wt_percent = max(0.00001, min(estimated_sulfur, 10.0)) 
         else:
-            for cut in cuts_output: cut.set_sulfur_properties(0.0)
-    else:
-        for cut in cuts_output: cut.set_sulfur_properties(0.0)
-    return cuts_output
+            self.sulfur_cut_wt_percent = self.crude_oil_feed.sulfur_total_wt_percent 
 
+        self.sulfur_cut_ppm = (self.sulfur_cut_wt_percent * 10000) if self.sulfur_cut_wt_percent is not None else None
+        
+        if self.verbose:
+            # --- MODIFICACIÓN AQUÍ ---
+            api_display = f"{self.api_cut:.1f}" if self.api_cut is not None else "N/A"
+            sulfur_display = f"{self.sulfur_cut_wt_percent:.4f}" if self.sulfur_cut_wt_percent is not None else "N/A"
+            yield_display = f"{self.yield_vol_percent:.2f}" if self.yield_vol_percent is not None else "N/A"
+            logging.info(f"Cut '{self.name}' calculated: YieldVol={yield_display}%, API={api_display}, S_wt%={sulfur_display}")
+            # --- FIN DE LA MODIFICACIÓN ---
 
-def calculate_atmospheric_cuts(crude_oil_feed: CrudeOil,
-                               atmospheric_cut_definitions: List[Tuple[str, float]],
-                               verbose: bool = False,
-                               api_sensitivity_factor: float = 7.0,
-                               empirical_data_for_crude: Optional[Dict[str, Any]] = None
-                               ) -> Tuple[List[DistillationCut], Optional[DistillationCut]]:
-    if verbose: logging.info(f"\n--- Calculating Atmospheric Cuts for '{crude_oil_feed.name}' ---")
-    # crude_oil_feed ya tiene su curva como TBP internamente
-    all_atmospheric_products = calculate_distillation_cuts(
-        crude_oil=crude_oil_feed,
-        cut_definitions=atmospheric_cut_definitions,
-        verbose=verbose,
-        api_sensitivity_factor=api_sensitivity_factor,
-        empirical_data=empirical_data_for_crude
-    )
-    # Lógica para separar destilados y residuo (sin cambios necesarios aquí)
-    atmospheric_distillates = []
-    atmospheric_residue_object = None
-    if all_atmospheric_products:
-        if atmospheric_cut_definitions and atmospheric_cut_definitions[-1][0].lower().startswith("residuo atmosf"):
-            found_residue = False
-            temp_distillates = []
-            for prod in all_atmospheric_products:
-                if prod.name.lower().startswith("residuo atmosf"):
-                    atmospheric_residue_object = prod
-                    found_residue = True
-                else:
-                    temp_distillates.append(prod)
-            atmospheric_distillates = temp_distillates
-            if not found_residue and all_atmospheric_products:
-                 atmospheric_residue_object = all_atmospheric_products[-1]
-                 atmospheric_distillates = all_atmospheric_products[:-1]
-        elif all_atmospheric_products[-1].name.startswith("Residuo de"):
-            atmospheric_residue_object = all_atmospheric_products[-1]
-            atmospheric_distillates = all_atmospheric_products[:-1]
-        else:
-            if len(all_atmospheric_products) == len(atmospheric_cut_definitions):
-                 atmospheric_distillates = all_atmospheric_products
-            elif len(all_atmospheric_products) > len(atmospheric_cut_definitions):
-                 atmospheric_residue_object = all_atmospheric_products[-1]
-                 atmospheric_distillates = all_atmospheric_products[:-1]
-            else:
-                 atmospheric_distillates = all_atmospheric_products
-    return atmospheric_distillates, atmospheric_residue_object
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "Corte": self.name,
+            "T Inicial (°C)": self.t_initial_C,
+            "T Final (°C)": self.t_final_C,
+            "Rend. Vol (%)": self.yield_vol_percent,
+            "Rend. Peso (%)": self.yield_wt_percent,
+            "API Corte": self.api_cut,
+            "SG Corte": self.sg_cut,
+            "Azufre (%peso)": self.sulfur_cut_wt_percent,
+            "Azufre (ppm)": self.sulfur_cut_ppm,
+            "VABP (°C)": self.vabp_C
+        }
 
+def calculate_atmospheric_cuts(
+    crude_oil_feed: CrudeOil, 
+    atmospheric_cut_definitions: List[Tuple[str, float]], 
+    verbose: bool = False,
+    api_sensitivity_factor: float = 7.0,
+    empirical_data_for_crude: Optional[Dict[str,Any]] = None 
+) -> Tuple[List[DistillationCut], Optional[DistillationCut]]:
+    if verbose:
+        logging.info(f"Calculating atmospheric cuts for: {crude_oil_feed.name}")
+        logging.info(f"Atmospheric cut definitions: {atmospheric_cut_definitions}")
 
-def create_vacuum_feed_from_residue(original_crude: CrudeOil, # CrudeOil original (con su TBP)
-                                    atmospheric_residue_cut: Optional[DistillationCut],
-                                    verbose: bool = False) -> Optional[CrudeOil]:
-    if atmospheric_residue_cut is None or atmospheric_residue_cut.yield_vol_percent is None or atmospheric_residue_cut.yield_vol_percent <= 1e-6:
-        if verbose: logging.info("Residuo atmosférico nulo o con rendimiento cero. No se crea alimentación a vacío.")
+    distillate_cuts: List[DistillationCut] = []
+    current_t_initial = crude_oil_feed.ibp_C if crude_oil_feed.ibp_C is not None else 0.0
+
+    sorted_cut_definitions = sorted(atmospheric_cut_definitions, key=lambda x: x[1])
+
+    for cut_name, t_final_C in sorted_cut_definitions:
+        if t_final_C <= current_t_initial: 
+            if verbose: logging.warning(f"Skipping atmospheric cut '{cut_name}' as its T_final ({t_final_C}°C) is not greater than current T_initial ({current_t_initial}°C).")
+            continue
+        
+        cut = DistillationCut(name=cut_name, 
+                              t_initial_C=current_t_initial, 
+                              t_final_C=t_final_C, 
+                              crude_oil_feed=crude_oil_feed,
+                              api_sensitivity_factor=api_sensitivity_factor,
+                              verbose=verbose)
+        distillate_cuts.append(cut)
+        current_t_initial = t_final_C 
+
+    atmospheric_residue_obj: Optional[DistillationCut] = None
+    if crude_oil_feed.fbp_C is not None and current_t_initial < crude_oil_feed.fbp_C:
+        atmospheric_residue_obj = DistillationCut(name="Residuo Atmosférico",
+                                                  t_initial_C=current_t_initial,
+                                                  t_final_C=crude_oil_feed.fbp_C, 
+                                                  crude_oil_feed=crude_oil_feed,
+                                                  api_sensitivity_factor=api_sensitivity_factor,
+                                                  verbose=verbose)
+        if verbose and atmospheric_residue_obj and atmospheric_residue_obj.yield_vol_percent is not None: # Check for None
+             logging.info(f"Atmospheric Residue calculated: YieldVol={atmospheric_residue_obj.yield_vol_percent:.2f}%")
+    elif verbose:
+        logging.info(f"No significant atmospheric residue to calculate. Current T_initial: {current_t_initial}°C, Crude FBP: {crude_oil_feed.fbp_C}°C")
+
+    if empirical_data_for_crude and empirical_data_for_crude.get("distribution_data", {}).get("cuts"):
+        logging.warning("Empirical data application for atmospheric cuts is not fully implemented yet.")
+
+    return distillate_cuts, atmospheric_residue_obj
+
+def create_vacuum_feed_from_residue(
+    original_crude_feed: CrudeOil, 
+    atmospheric_residue: DistillationCut, 
+    verbose: bool = False
+) -> Optional[CrudeOil]:
+    if atmospheric_residue.yield_vol_percent is None or atmospheric_residue.yield_vol_percent < 1e-3: 
+        if verbose: logging.info("Atmospheric residue yield is too low to create vacuum feed.")
         return None
-    if atmospheric_residue_cut.api_cut is None or atmospheric_residue_cut.sulfur_cut_wt_percent is None:
-        logging.error(f"No se puede crear alim. vacío desde '{atmospheric_residue_cut.name}', faltan API o Azufre."); return None
 
-    # Las temperaturas del residuo atmosférico (t_initial_C, t_final_C) se refieren a la escala TBP del crudo original.
-    t_start_res_abs_tbp = atmospheric_residue_cut.t_initial_C # Esta es TBP equivalente
-    t_end_res_abs_tbp = original_crude.fbp_C # El FBP del crudo original (TBP)
+    if verbose:
+        logging.info(f"Creating vacuum feed from atmospheric residue of '{original_crude_feed.name}'.")
+        api_cut_display = f"{atmospheric_residue.api_cut:.1f}" if atmospheric_residue.api_cut is not None else "N/A"
+        sulfur_cut_display = f"{atmospheric_residue.sulfur_cut_wt_percent:.4f}" if atmospheric_residue.sulfur_cut_wt_percent is not None else "N/A"
+        logging.info(f"Atmospheric Residue props: API={api_cut_display}, S%wt={sulfur_cut_display}")
+    
+    vac_feed_t_initial = atmospheric_residue.t_initial_C
+    vac_feed_t_final = original_crude_feed.fbp_C 
 
-    # Volúmenes en la curva TBP del crudo original
-    vol_start_res_orig_tbp = original_crude.get_volume_at_temperature(t_start_res_abs_tbp)
-    total_vol_res_orig_scale_tbp = 100.0 - vol_start_res_orig_tbp
+    if vac_feed_t_final is None or vac_feed_t_initial >= vac_feed_t_final:
+        if verbose: logging.warning(f"Cannot create vacuum feed: T_initial_residue ({vac_feed_t_initial}) >= FBP_crude ({vac_feed_t_final}).")
+        return None
 
-    if total_vol_res_orig_scale_tbp <= 1e-6:
-        if verbose: logging.info(f"Volumen de residuo atm. en escala TBP ({total_vol_res_orig_scale_tbp}%) muy pequeño. No se crea alim. vacío."); return None
+    original_vols = np.array(original_crude_feed.distillation_volumes_percent)
+    original_temps = np.array(original_crude_feed.distillation_temperatures_C)
 
-    vac_feed_tbp_curve = []
-    for new_vol_pct_on_vac_feed in np.linspace(0, 100, 21): # 0-100% de la alimentación a vacío
-        # Convertir %vol en alim. vacío a %vol en crudo original (escala TBP)
-        orig_equiv_vol_tbp = vol_start_res_orig_tbp + (new_vol_pct_on_vac_feed / 100.0) * total_vol_res_orig_scale_tbp
-        orig_equiv_vol_tbp = min(orig_equiv_vol_tbp, 100.0) # No exceder 100% del crudo original
+    mask = (original_temps >= vac_feed_t_initial) & (original_temps <= vac_feed_t_final)
+    residue_temps_on_orig_curve = original_temps[mask]
+    residue_vols_on_orig_curve = original_vols[mask]
 
-        # Obtener la temperatura TBP correspondiente del crudo original
-        temp_at_new_vol_tbp = original_crude.get_temperature_at_volume(orig_equiv_vol_tbp)
-        vac_feed_tbp_curve.append((new_vol_pct_on_vac_feed, temp_at_new_vol_tbp))
-
-    if vac_feed_tbp_curve: # Asegurar que IBP y FBP de la nueva curva sean consistentes
-        vac_feed_tbp_curve[0] = (0.0, t_start_res_abs_tbp) # IBP de la alim. vacío es T inicial del residuo (TBP)
-        vac_feed_tbp_curve[-1] = (100.0, t_end_res_abs_tbp) # FBP de la alim. vacío es FBP del crudo original (TBP)
-
-    vac_feed_name = f"Alim. Vacío de {original_crude.name}"
-    if verbose: logging.info(f"Creando alim. vacío: {vac_feed_name}. API: {atmospheric_residue_cut.api_cut:.1f}, S: {atmospheric_residue_cut.sulfur_cut_wt_percent:.4f}%")
-
-    # La alimentación a vacío se crea con su propia curva TBP.
-    # El tipo de curva es "TBP" por definición.
-    return CrudeOil(name=vac_feed_name, api_gravity=atmospheric_residue_cut.api_cut,
-                    sulfur_content_wt_percent=atmospheric_residue_cut.sulfur_cut_wt_percent,
-                    distillation_data_percent_vol_temp_C=vac_feed_tbp_curve,
-                    distillation_curve_type="TBP", # Es una curva TBP por construcción
-                    verbose=verbose, is_blend=original_crude.is_blend)
-
-
-def calculate_vacuum_cuts(vacuum_feed: CrudeOil, # vacuum_feed ya es un CrudeOil con curva TBP
-                          vacuum_cut_definitions: List[Tuple[str, float]],
-                          verbose: bool = False,
-                          api_sensitivity_factor: float = 7.0
-                          ) -> List[DistillationCut]:
-    if verbose: logging.info(f"\n--- Calculating Vacuum Cuts for '{vacuum_feed.name}' ---")
-    # vacuum_feed.ibp_C, etc., ya son TBP.
-    vacuum_products = calculate_distillation_cuts(
-        crude_oil=vacuum_feed, cut_definitions=vacuum_cut_definitions,
-        verbose=verbose, api_sensitivity_factor=api_sensitivity_factor,
-        empirical_data=None # No se suelen aplicar datos empíricos de crudo aquí
-    )
-    return vacuum_products
-
-
-def apply_empirical_distribution(crude_oil: CrudeOil, cut_definitions: List[Tuple[str, float]],
-                                 empirical_data: Dict[str, Any], verbose: bool = False,
-                                 api_sensitivity_factor: float = 7.0) -> List[DistillationCut]:
-    if verbose: logging.info(f"Applying empirical distribution for {crude_oil.name}")
-    cuts_output = []
-    empirical_cuts_list = empirical_data.get('distribution_data', {}).get('cuts', [])
-    empirical_cuts_map = {cut_data.get("Corte"): cut_data for cut_data in empirical_cuts_list if isinstance(cut_data, dict) and cut_data.get("Corte")}
-
-    def _safe_float(value: Any, default: Optional[float] = 0.0) -> Optional[float]:
-        if value is None or (isinstance(value, str) and value.strip().upper() in ["N/A", "NA", ""]): return default
-        try: return float(value)
-        except (ValueError, TypeError):
-            logging.warning(f"Empirical apply: Could not convert '{value}' to float, using default {default}.")
-            return default
-
-    current_t_initial_C = crude_oil.ibp_C # IBP de la TBP del crudo
-    total_empirical_yield_vol = 0.0
-    processed_empirical_cuts = set()
-
-    for cut_name, cut_t_final_C_val in cut_definitions:
-        t_start = current_t_initial_C; t_end = float(cut_t_final_C_val)
-        cut = DistillationCut(name=cut_name, t_initial_C=t_start, t_final_C=t_end, crude_oil_ref=crude_oil)
-
-        if cut_name in empirical_cuts_map:
-            emp_cut = empirical_cuts_map[cut_name]
-            if verbose: logging.info(f"  Using empirical data for cut '{cut_name}'")
-            cut.yield_vol_percent = _safe_float(emp_cut.get("Rend. Vol (%)"))
-            cut.yield_wt_percent = _safe_float(emp_cut.get("Rend. Peso (%)"))
-            cut.api_cut = _safe_float(emp_cut.get("API Corte"), None)
-            cut.sg_cut = api_to_sg(cut.api_cut)
-            cut.vabp_C = _safe_float(emp_cut.get("VABP (°C)"), (t_start + t_end) / 2.0)
-            cut.set_sulfur_properties(_safe_float(emp_cut.get("Azufre (%peso)")))
-            cut.distillation_curve = cut._estimate_distillation_curve() # Estimar curva TBP del corte
-            total_empirical_yield_vol += cut.yield_vol_percent if cut.yield_vol_percent is not None else 0.0
-            processed_empirical_cuts.add(cut_name)
-        else:
-            if verbose: logging.info(f"  No empirical data for cut '{cut_name}', calculating theoretically.")
-            cut.calculate_basic_properties(api_sensitivity_factor=api_sensitivity_factor)
-        cuts_output.append(cut)
-        current_t_initial_C = t_end
-
-    if current_t_initial_C < crude_oil.fbp_C: # FBP de la TBP del crudo
-        residue_name_inferred = f"Residuo de {crude_oil.name}"
-        is_residue_defined = (cut_definitions and cut_definitions[-1][0].lower().startswith("residuo")) or \
-                             any(name.lower().startswith("residuo") for name in empirical_cuts_map if name not in processed_empirical_cuts)
-        if not is_residue_defined:
-             residue_cut = DistillationCut(name=residue_name_inferred, t_initial_C=current_t_initial_C, t_final_C=crude_oil.fbp_C, crude_oil_ref=crude_oil)
-             residue_cut.calculate_basic_properties(api_sensitivity_factor=api_sensitivity_factor)
-             vol_at_residue_start = crude_oil.get_volume_at_temperature(current_t_initial_C)
-             residue_cut.yield_vol_percent = 100.0 - vol_at_residue_start
-             if residue_cut.sg_cut and crude_oil.sg and crude_oil.sg > 1e-6 and residue_cut.yield_vol_percent is not None:
-                 residue_cut.yield_wt_percent = residue_cut.yield_vol_percent * (residue_cut.sg_cut / crude_oil.sg)
-             else: residue_cut.yield_wt_percent = 0.0
-             cuts_output.append(residue_cut)
-             if verbose: logging.info(f"  Calculated theoretical residue '{residue_cut.name}'")
-
-    unused_empirical_cuts = set(empirical_cuts_map.keys()) - processed_empirical_cuts
-    if unused_empirical_cuts:
-        logging.warning(f"Empirical cuts defined but not matched to theoretical definitions: {', '.join(unused_empirical_cuts)}")
-    return cuts_output
-
-
-# --- Código de Prueba (sin cambios significativos, pero ahora CrudeOil toma el tipo de curva) ---
-if __name__ == "__main__":
-    # Ejemplo con una curva que podría ser D86 (requeriría conversión real)
-    crude1_data_points_d86_example = [(0, 35), (10, 100), (30, 200), (50, 280), (70, 360), (90, 450), (95, 500)] # Simula D86 (más bajo IBP)
-    test_crude_obj_d86 = CrudeOil(name="Crudo Ejemplo (Simula D86)", api_gravity=38.0, # API más alto para D86
-                              sulfur_content_wt_percent=0.05,
-                              distillation_data_percent_vol_temp_C=crude1_data_points_d86_example,
-                              distillation_curve_type="ASTM D86", # Especificar tipo
-                              verbose=True)
-
-    # Ejemplo con una curva TBP directa
-    crude2_data_points_tbp = [(0, 50), (10, 120), (30, 220), (50, 300), (70, 380), (90, 480), (100, 550)]
-    test_crude_obj_tbp = CrudeOil(name="Crudo Ejemplo (TBP Directa)", api_gravity=35.0,
-                              sulfur_content_wt_percent=0.10,
-                              distillation_data_percent_vol_temp_C=crude2_data_points_tbp,
-                              distillation_curve_type="TBP", # Especificar tipo
-                              verbose=True)
-
-    atm_cut_defs = [("Nafta Ligera", 90.0), ("Nafta Pesada", 175.0), ("Kerosene", 230.0), ("Gasóleo Atmosférico", 350.0)]
-
-    logging.info("\n--- Prueba Torre Atmosférica con Crudo (Simula D86) ---")
-    atm_distillates_d86, atm_residue_d86 = calculate_atmospheric_cuts(test_crude_obj_d86, atm_cut_defs, verbose=True, api_sensitivity_factor=7.0)
-    for c in atm_distillates_d86: logging.info(f"  Distillate: {c.name}: Rend Vol {c.yield_vol_percent:.2f}%, API {c.api_cut:.1f if c.api_cut else 'N/A'}")
-    if atm_residue_d86: logging.info(f"  Residue: {atm_residue_d86.name}: Rend Vol {atm_residue_d86.yield_vol_percent:.2f}%, API {atm_residue_d86.api_cut:.1f if atm_residue_d86.api_cut else 'N/A'}")
-
-
-    logging.info("\n--- Prueba Torre Atmosférica con Crudo (TBP Directa) ---")
-    atm_distillates_tbp, atm_residue_tbp = calculate_atmospheric_cuts(test_crude_obj_tbp, atm_cut_defs, verbose=True, api_sensitivity_factor=7.0)
-    for c in atm_distillates_tbp: logging.info(f"  Distillate: {c.name}: Rend Vol {c.yield_vol_percent:.2f}%, API {c.api_cut:.1f if c.api_cut else 'N/A'}")
-    if atm_residue_tbp:
-        logging.info(f"  Residue: {atm_residue_tbp.name}: Rend Vol {atm_residue_tbp.yield_vol_percent:.2f}%, API {atm_residue_tbp.api_cut:.1f if atm_residue_tbp.api_cut else 'N/A'}")
-        logging.info("\n--- Creando Alimentación a Vacío (desde TBP) ---")
-        vacuum_feed_tbp = create_vacuum_feed_from_residue(test_crude_obj_tbp, atm_residue_tbp, verbose=True)
-        if vacuum_feed_tbp:
-            vac_cut_defs = [("VGO Ligero", 450.0), ("VGO Pesado", 550.0)] # Temperaturas TBP equivalentes
-            logging.info("\n--- Prueba Torre de Vacío (desde TBP) ---")
-            vacuum_products_tbp = calculate_vacuum_cuts(vacuum_feed_tbp, vac_cut_defs, verbose=True, api_sensitivity_factor=7.0)
-            for vp in vacuum_products_tbp:
-                 yield_on_original_crude = (vp.yield_vol_percent / 100.0) * (atm_residue_tbp.yield_vol_percent / 100.0) * 100.0 if vp.yield_vol_percent and atm_residue_tbp.yield_vol_percent else 0.0
-                 logging.info(f"  Vac Product: {vp.name}: Rend Vol (on VacFeed) {vp.yield_vol_percent:.2f}%, Rend Vol (on OrigCrude) {yield_on_original_crude:.2f}%, API {vp.api_cut:.1f if vp.api_cut else 'N/A'}")
+    if len(residue_vols_on_orig_curve) < 2:
+        if verbose: logging.warning(f"Not enough points from original crude curve to define vacuum feed curve. Points found: {len(residue_vols_on_orig_curve)}")
+        vac_feed_dist_curve = [(0.0, vac_feed_t_initial), (100.0, vac_feed_t_final)]
     else:
-        logging.info("No se generó residuo atmosférico para procesar en vacío (desde TBP).")
+        vol_start_of_residue_on_orig_crude = original_crude_feed.get_volume_at_temp(vac_feed_t_initial)
+        vol_end_of_residue_on_orig_crude = original_crude_feed.get_volume_at_temp(vac_feed_t_final) 
+
+        total_vol_span_of_residue_on_orig_crude = vol_end_of_residue_on_orig_crude - vol_start_of_residue_on_orig_crude
+        
+        if total_vol_span_of_residue_on_orig_crude < 1e-3: 
+             if verbose: logging.warning("Residue volume span on original crude is too small for renormalization. Using simple 2-point curve for vacuum feed.")
+             vac_feed_dist_curve = [(0.0, vac_feed_t_initial), (100.0, vac_feed_t_final)]
+        else:
+            renormalized_vols = ((residue_vols_on_orig_curve - vol_start_of_residue_on_orig_crude) / total_vol_span_of_residue_on_orig_crude) * 100.0
+            vac_feed_dist_curve_points = []
+            if not np.isclose(renormalized_vols[0], 0.0):
+                vac_feed_dist_curve_points.append((0.0, residue_temps_on_orig_curve[0])) 
+            
+            for vol, temp in zip(renormalized_vols, residue_temps_on_orig_curve):
+                vac_feed_dist_curve_points.append((vol, temp))
+
+            if not np.isclose(renormalized_vols[-1], 100.0):
+                 vac_feed_dist_curve_points.append((100.0, residue_temps_on_orig_curve[-1])) 
+            
+            temp_df = pd.DataFrame(vac_feed_dist_curve_points, columns=['vol', 'temp']).drop_duplicates(subset=['vol'], keep='last')
+            vac_feed_dist_curve = list(zip(temp_df['vol'], temp_df['temp']))
+
+    vac_feed_api = atmospheric_residue.api_cut if atmospheric_residue.api_cut is not None else original_crude_feed.api_gravity 
+    vac_feed_sulfur = atmospheric_residue.sulfur_cut_wt_percent if atmospheric_residue.sulfur_cut_wt_percent is not None else original_crude_feed.sulfur_total_wt_percent 
+
+    vacuum_feed_crude = CrudeOil(name=f"Alimentación Vacío (de {original_crude_feed.name})",
+                                 api_gravity=vac_feed_api,
+                                 sulfur_content_wt_percent=vac_feed_sulfur,
+                                 distillation_data_percent_vol_temp_C=vac_feed_dist_curve,
+                                 distillation_curve_type="TBP", 
+                                 is_blend=original_crude_feed.is_blend, 
+                                 verbose=verbose)
+    if verbose:
+        logging.info(f"Vacuum feed created: {vacuum_feed_crude.name}, API: {vacuum_feed_crude.api_gravity:.1f}")
+        logging.info(f"  Vacuum feed TBP curve (first 5 points): {vacuum_feed_crude.original_raw_distillation_data[:5]}")
+    return vacuum_feed_crude
+
+def calculate_vacuum_cuts(
+    vacuum_feed: CrudeOil, 
+    vacuum_cut_definitions: List[Tuple[str, float]], 
+    verbose: bool = False,
+    api_sensitivity_factor: float = 7.0
+) -> List[DistillationCut]:
+    if verbose:
+        logging.info(f"Calculating vacuum cuts for: {vacuum_feed.name}")
+        logging.info(f"Vacuum cut definitions (TBP eq. atm.): {vacuum_cut_definitions}")
+
+    vacuum_distillates: List[DistillationCut] = []
+    current_t_initial_vac = vacuum_feed.ibp_C if vacuum_feed.ibp_C is not None else 0.0 
+
+    sorted_vac_cut_definitions = sorted(vacuum_cut_definitions, key=lambda x: x[1])
+
+    for cut_name, t_final_C_eq_atm in sorted_vac_cut_definitions:
+        if t_final_C_eq_atm <= current_t_initial_vac:
+            if verbose: logging.warning(f"Skipping vacuum cut '{cut_name}' as T_final_eq_atm ({t_final_C_eq_atm}°C) is not > current T_initial_vac ({current_t_initial_vac}°C).")
+            continue
+
+        vac_cut = DistillationCut(name=cut_name,
+                                  t_initial_C=current_t_initial_vac,
+                                  t_final_C=t_final_C_eq_atm,
+                                  crude_oil_feed=vacuum_feed, 
+                                  api_sensitivity_factor=api_sensitivity_factor,
+                                  verbose=verbose)
+        vacuum_distillates.append(vac_cut)
+        current_t_initial_vac = t_final_C_eq_atm
+
+    if vacuum_feed.fbp_C is not None and current_t_initial_vac < vacuum_feed.fbp_C:
+        vacuum_residue_obj = DistillationCut(name="Residuo de Vacío",
+                                             t_initial_C=current_t_initial_vac,
+                                             t_final_C=vacuum_feed.fbp_C, 
+                                             crude_oil_feed=vacuum_feed,
+                                             api_sensitivity_factor=api_sensitivity_factor,
+                                             verbose=verbose)
+        vacuum_distillates.append(vacuum_residue_obj) 
+        if verbose and vacuum_residue_obj and vacuum_residue_obj.yield_vol_percent is not None: # Check for None
+            logging.info(f"Vacuum Residue calculated: YieldVol={vacuum_residue_obj.yield_vol_percent:.2f}%")
+    elif verbose:
+        logging.info(f"No significant vacuum residue to calculate. Current T_initial_vac: {current_t_initial_vac}°C, VacFeed FBP: {vacuum_feed.fbp_C}°C")
+        
+    return vacuum_distillates
+
+# --- Example Test Block (Uncomment to run this file directly for testing) ---
+# if __name__ == '__main__':
+#     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(module)s - %(funcName)s - %(lineno)d - %(message)s')
+
+#     example_crude_data = [(0,50),(10,100),(30,200),(50,280),(70,380),(90,480),(100,550)]
+#     test_crude = CrudeOil(name="Crudo Ejemplo Test", api_gravity=32.0, sulfur_content_wt_percent=1.5,
+#                           distillation_data_percent_vol_temp_C=example_crude_data, verbose=True)
+#     print(f"\nTest Crude created: {test_crude}")
+
+#     atm_cuts_def = [("Nafta Ligera", 85.0), ("Nafta Pesada", 150.0), ("Kerosene", 250.0), ("Diesel Ligero", 350.0)]
+#     print(f"\n--- Testing Atmospheric Distillation for {test_crude.name} ---")
+#     atm_distillates, atm_residue = calculate_atmospheric_cuts(test_crude, atm_cuts_def, verbose=True, api_sensitivity_factor=7.0)
+    
+#     print("\nAtmospheric Distillates:")
+#     for cut in atm_distillates:
+#         api_disp = f"{cut.api_cut:.1f}" if cut.api_cut is not None else "N/A"
+#         s_disp = f"{cut.sulfur_cut_wt_percent:.4f}" if cut.sulfur_cut_wt_percent is not None else "N/A"
+#         y_disp = f"{cut.yield_vol_percent:.2f}" if cut.yield_vol_percent is not None else "N/A"
+#         print(f"  {cut.name}: YieldVol={y_disp}%, API={api_disp}, S_wt%={s_disp}")
+#     if atm_residue:
+#         api_disp = f"{atm_residue.api_cut:.1f}" if atm_residue.api_cut is not None else "N/A"
+#         s_disp = f"{atm_residue.sulfur_cut_wt_percent:.4f}" if atm_residue.sulfur_cut_wt_percent is not None else "N/A"
+#         y_disp = f"{atm_residue.yield_vol_percent:.2f}" if atm_residue.yield_vol_percent is not None else "N/A"
+#         print(f"Atmospheric Residue: YieldVol={y_disp}%, API={api_disp}, S_wt%={s_disp}")
+#     else:
+#         print("No Atmospheric Residue produced.")
+
+#     if atm_residue and atm_residue.yield_vol_percent is not None and atm_residue.yield_vol_percent > 0.1 :
+#         print(f"\n--- Testing Vacuum Distillation ---")
+#         vacuum_feed = create_vacuum_feed_from_residue(test_crude, atm_residue, verbose=True)
+#         if vacuum_feed:
+#             ibp_disp = f"{vacuum_feed.ibp_C:.1f}" if vacuum_feed.ibp_C is not None else "N/A"
+#             fbp_disp = f"{vacuum_feed.fbp_C:.1f}" if vacuum_feed.fbp_C is not None else "N/A"
+#             print(f"Vacuum Feed created: {vacuum_feed.name}, API: {vacuum_feed.api_gravity:.1f}, IBP: {ibp_disp}, FBP: {fbp_disp}")
+#             vac_cuts_def = [("LVGO", 420.0), ("MVGO", 480.0), ("HVGO", 520.0)] 
+#             vacuum_products = calculate_vacuum_cuts(vacuum_feed, vac_cuts_def, verbose=True, api_sensitivity_factor=5.0)
+#             print("\nVacuum Products:")
+#             for prod in vacuum_products:
+#                 api_disp = f"{prod.api_cut:.1f}" if prod.api_cut is not None else "N/A"
+#                 s_disp = f"{prod.sulfur_cut_wt_percent:.4f}" if prod.sulfur_cut_wt_percent is not None else "N/A"
+#                 y_disp = f"{prod.yield_vol_percent:.2f}" if prod.yield_vol_percent is not None else "N/A"
+#                 print(f"  {prod.name}: YieldVol={y_disp}%, API={api_disp}, S_wt%={s_disp}")
+#         else:
+#             print("Could not create vacuum feed.")
+#     else:
+#         print("\nSkipping vacuum distillation test as atmospheric residue yield is too low.")
+
+#     test_components_valid = [
+#         {'name': 'Crudo Ligero Valido', 'api': 35.0, 'sulfur': 0.2, 'proportion_vol': 60.0,
+#          'distillation_data': [(0.0,50.0), (10.0,100.0), (50.0,280.0), (90.0,450.0), (100.0,500.0)],
+#          'distillation_curve_type': 'TBP'},
+#         {'name': 'Crudo Pesado Valido', 'api': 22.0, 'sulfur': 1.5, 'proportion_vol': 40.0,
+#          'distillation_data': [(0.0,100.0), (10.0,180.0), (50.0,350.0), (90.0,550.0), (100.0,600.0)],
+#          'distillation_curve_type': 'TBP'}
+#     ]
+#     print("\n--- Testing Blending ---")
+#     try:
+#         blend_valid = create_blend_from_crudes(test_components_valid, verbose=True)
+#         print(f"SUCCESS: Valid blend created: {blend_valid.name}, API: {blend_valid.api_gravity:.1f}")
+#         print(f"  Blend TBP Curve (first 5 points): {list(zip(blend_valid.distillation_volumes_percent, blend_valid.distillation_temperatures_C))[:5]}")
+#     except Exception as e:
+#         print(f"ERROR in Blending Test: {e}")
+#         logging.exception("Exception in Blending Test")
+
+#     test_components_problematic = [
+#         {'name': 'Escalante (Ejemplo)', 'api': 23.7, 'sulfur': 0.24, 'proportion_vol': 100.0, 
+#          'distillation_data': [(0,160), (10,248), (30,345), (50,432), (70,530), (90,670), (95,720), (100,750)], 
+#          'distillation_curve_type': 'TBP'},
+#         {'name': 'CSV Test', 'api': 30.0, 'sulfur': 1.0, 'proportion_vol': 0.0, 
+#          'distillation_data': [(0.0, 60.0), (10.0, 150.5), (50.0, 280.0), (100.0, 500.0)], 
+#          'distillation_curve_type': 'TBP'}
+#     ]
+#     print("\n--- Testing Blending with Escalante ---")
+#     try:
+#         blend_escalante = create_blend_from_crudes(test_components_problematic, verbose=True)
+#         print(f"SUCCESS: Escalante blend created: {blend_escalante.name}, API: {blend_escalante.api_gravity:.1f}")
+#     except Exception as e:
+#         print(f"ERROR in Escalante Blending Test: {e}")
+#         logging.exception("Exception in Escalante Blending Test")
 
